@@ -18,9 +18,7 @@ const MainMapComponent = () => {
 			mapStyle={
 				"https://api.maptiler.com/maps/streets/style.json?key=BrpsEqmYwqOM5P8UK511"
 			}
-		>
-			<NavigationControl position="top-left" />
-		</Map>
+		></Map>
 	);
 };
 
