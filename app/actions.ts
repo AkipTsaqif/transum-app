@@ -49,7 +49,8 @@ export const signInAction = async (formData: FormData) => {
     return encodedRedirect("error", "/sign-in", error.message);
   }
 
-  return redirect("/protected");
+  // Land on the map -- that is the app.
+  return redirect("/");
 };
 
 export const forgotPasswordAction = async (formData: FormData) => {
