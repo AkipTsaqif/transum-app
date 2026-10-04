@@ -7,6 +7,7 @@ import type {
     StationDetail,
     StationIndexEntry,
     StationRoute,
+    StationSearchHit,
 } from "@/utils/types/gtfs";
 
 const DATA_DIR = path.join(process.cwd(), "data", "gtfs");
@@ -168,6 +169,41 @@ export async function getOverview(): Promise<ShapeCollection> {
     );
     overviewCache = JSON.parse(raw) as ShapeCollection;
     return overviewCache;
+}
+
+/**
+ * Substring search over station names, ranked so prefix matches come first
+ * and busier interchanges outrank single-route stops.
+ */
+export async function searchStations(
+    query: string,
+    limit = 20
+): Promise<StationSearchHit[]> {
+    const stations = await getStationIndex();
+    const q = query.toLowerCase();
+
+    const hits: Array<StationSearchHit & { rank: number }> = [];
+
+    for (const s of stations.values()) {
+        const idx = s.name.toLowerCase().indexOf(q);
+        if (idx === -1) continue;
+
+        hits.push({
+            name: s.name,
+            lat: s.lat,
+            lon: s.lon,
+            routeCount: s.routes.length,
+            // Earlier match wins; ties broken by how many routes call there.
+            rank: idx * 1000 - s.routes.length,
+        });
+    }
+
+    hits.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+
+    return hits.slice(0, limit).map(({ rank, ...rest }) => {
+        void rank;
+        return rest;
+    });
 }
 
 let stopLayerCache: unknown = null;

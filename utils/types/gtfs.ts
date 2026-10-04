@@ -86,6 +86,14 @@ export interface StationDetail {
     routes: StationRoute[];
 }
 
+/** One result from `/api/gtfs/search`. */
+export interface StationSearchHit {
+    name: string;
+    lat: number;
+    lon: number;
+    routeCount: number;
+}
+
 /** A route drawn on the map, paired with the colour to draw it in. */
 export interface DrawnRoute {
     route_id: string;

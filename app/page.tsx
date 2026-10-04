@@ -21,9 +21,11 @@ import type {
     RouteSummary,
     ShapeCollection,
     StationDetail,
+    StationSearchHit,
 } from "@/utils/types/gtfs";
 import type { FeatureCollection } from "geojson";
-import { ArrowLeft, MapPin } from "lucide-react";
+
+import { ArrowLeft, MapPin, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -48,6 +50,10 @@ export default function Index() {
     const [overview, setOverview] = useState<ShapeCollection | null>(null);
     // Every stop as points; fetched lazily the first time the user zooms in.
     const [allStops, setAllStops] = useState<FeatureCollection | null>(null);
+
+    // Stop-name matches for the current query. Routes are filtered locally
+    // from the index already on the client; stops live server-side.
+    const [stopHits, setStopHits] = useState<StationSearchHit[]>([]);
 
     const [station, setStation] = useState<StationDetail | null>(null);
     const [stationLoading, setStationLoading] = useState(false);
@@ -250,6 +256,20 @@ export default function Index() {
         setStationLoading(false);
     }, []);
 
+    /**
+     * Clear everything drawn, leaving the camera untouched. With no layers the
+     * bounds memo returns null and the fitBounds effect early-returns, so the
+     * map holds its current position and zoom.
+     */
+    const clearSelection = useCallback(() => {
+        abortRef.current?.abort();
+        clearStation();
+        setSelectedRouteId(null);
+        setDetail(null);
+        setDetailError(null);
+        setDetailLoading(false);
+    }, [clearStation]);
+
     // What the map draws: the station's routes when a stop is open, otherwise
     // the single selected route.
     const layers: DrawnLayer[] = useMemo(() => {
@@ -288,6 +308,34 @@ export default function Index() {
         }
         return detail?.stops ?? [];
     }, [station, stationRoutes, detail]);
+
+    // Stop-name search. Debounced so typing does not fire a request per key.
+    useEffect(() => {
+        const q = searchQuery.trim();
+        if (q.length < 2) {
+            setStopHits([]);
+            return;
+        }
+
+        const ctrl = new AbortController();
+        const timer = setTimeout(async () => {
+            try {
+                const res = await fetch(
+                    `/api/gtfs/search?q=${encodeURIComponent(q)}`,
+                    { signal: ctrl.signal }
+                );
+                if (!res.ok) return;
+                setStopHits((await res.json()) as StationSearchHit[]);
+            } catch {
+                // Aborted or offline: routes still filter locally.
+            }
+        }, 200);
+
+        return () => {
+            clearTimeout(timer);
+            ctrl.abort();
+        };
+    }, [searchQuery]);
 
     // Derived state belongs in useMemo, not in a useEffect + setState pair.
     const filteredRoutes = useMemo(() => {
@@ -370,12 +418,29 @@ export default function Index() {
                           field. Pin it to the sidebar's own palette instead.
                         */}
                         <Input
-                            placeholder="Cari rute"
-                            aria-label="Cari rute"
+                            placeholder="Cari rute atau halte"
+                            aria-label="Cari rute atau halte"
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
                             className="border-white/20 bg-white/10 text-white placeholder:text-white/50 focus-visible:ring-white/40 focus-visible:ring-offset-jakarta"
                         />
+
+                        {/*
+                          Clearing never moves the camera: with no layers the
+                          bounds memo yields null and the fitBounds effect
+                          returns early, so the view stays exactly where the
+                          user left it.
+                        */}
+                        {(selectedRouteId || station) && (
+                            <button
+                                type="button"
+                                onClick={clearSelection}
+                                className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-white/20 bg-white/5 px-3 py-1.5 text-xs text-white/80 transition-colors hover:bg-white/15 hover:text-white"
+                            >
+                                <X size={13} />
+                                Bersihkan pilihan
+                            </button>
+                        )}
                     </div>
 
                     <div className="flex-1 overflow-y-auto pl-4 pr-4 pb-4">
@@ -392,6 +457,47 @@ export default function Index() {
                             />
                         )}
 
+                        {/* Matching stops, above the matching routes. */}
+                        {!station && stopHits.length > 0 && (
+                            <div className="-ml-4 -mr-4 mb-2">
+                                <div className="px-4 pb-1 text-xs font-bold tracking-wide text-white/40 uppercase">
+                                    Halte
+                                </div>
+                                {stopHits.map((s) => (
+                                    <button
+                                        key={`${s.name}@${s.lat},${s.lon}`}
+                                        type="button"
+                                        onClick={() => {
+                                            handleStationClick(
+                                                s.name,
+                                                s.lat,
+                                                s.lon
+                                            );
+                                            setSheetOpen(false);
+                                        }}
+                                        className="flex w-full cursor-pointer items-center gap-2 p-2 pr-4 pl-4 text-left text-white transition-colors hover:bg-white/10"
+                                    >
+                                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10">
+                                            <MapPin size={16} />
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="font-pt-sans">
+                                                {s.name}
+                                            </div>
+                                            <div className="text-xs text-white/50">
+                                                {s.routeCount} rute
+                                            </div>
+                                        </div>
+                                    </button>
+                                ))}
+                                {filteredRoutes.length > 0 && (
+                                    <div className="mt-2 px-4 pb-1 text-xs font-bold tracking-wide text-white/40 uppercase">
+                                        Rute
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         {!station && routesLoading && <RouteListSkeleton />}
 
                         {routesError && (
@@ -403,10 +509,11 @@ export default function Index() {
                         {!station &&
                             !routesLoading &&
                             !routesError &&
-                            filteredRoutes.length === 0 && (
+                            filteredRoutes.length === 0 &&
+                            stopHits.length === 0 && (
                                 <div className="text-sm text-white/60 p-2">
-                                    Tidak ada rute yang cocok dengan &quot;
-                                    {searchQuery}&quot;.
+                                    Tidak ada rute atau halte yang cocok dengan
+                                    &quot;{searchQuery}&quot;.
                                 </div>
                             )}
 

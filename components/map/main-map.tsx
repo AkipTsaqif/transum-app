@@ -14,6 +14,7 @@ import {
 } from "maplibre-gl";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FeatureCollection, Point } from "geojson";
+import { useTheme } from "next-themes";
 import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
 import { BusFront } from "lucide-react";
 import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
@@ -51,13 +52,16 @@ const EMPTY_GEOJSON: ShapeCollection = {
  * broken on screen. Stadia's equivalents return a real 401.
  *
  * MapTiler is still used when a key is present.
+ *
+ * The dark variant pairs with the app's dark mode. Note OpenFreeMap calls it
+ * `dark`, not `dark-matter` -- the latter 404s.
  */
-const OPENFREEMAP_POSITRON = "https://tiles.openfreemap.org/styles/positron";
+const KEY = process.env.NEXT_PUBLIC_MAPTILER_KEY;
 
-const MAP_STYLE: string | StyleSpecification = process.env
-    .NEXT_PUBLIC_MAPTILER_KEY
-    ? `https://api.maptiler.com/maps/dataviz/style.json?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}`
-    : OPENFREEMAP_POSITRON;
+const mapStyleFor = (dark: boolean): string =>
+    KEY
+        ? `https://api.maptiler.com/maps/${dark ? "dataviz-dark" : "dataviz"}/style.json?key=${KEY}`
+        : `https://tiles.openfreemap.org/styles/${dark ? "dark" : "positron"}`;
 
 export interface DrawnLayer {
     id: string;
@@ -244,6 +248,13 @@ const MainMapComponent = ({
 
     const mapRef = useRef<MapRef | null>(null);
 
+    // `resolvedTheme` collapses "system" to the actual light/dark value.
+    const { resolvedTheme } = useTheme();
+    const mapStyle = useMemo(
+        () => mapStyleFor(resolvedTheme === "dark"),
+        [resolvedTheme]
+    );
+
     // Uncontrolled camera (initialViewState + no `onMove` write-back) so
     // fitBounds can animate freely. A controlled viewState would be re-applied
     // by React on every frame and fight the easing.
@@ -329,7 +340,7 @@ const MainMapComponent = ({
             // Fills whatever the parent allots. A hard 100vh would overflow the
             // mobile layout, where the map shares the screen with a bottom sheet.
             style={{ width: "100%", height: "100%" }}
-            mapStyle={MAP_STYLE}
+            mapStyle={mapStyle}
         >
             <NavigationControl position="bottom-right" />
 
