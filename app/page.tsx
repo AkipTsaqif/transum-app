@@ -1,6 +1,8 @@
 "use client";
 
-import MainMapComponent from "@/components/map/main-map";
+import MainMapComponent, {
+    type DrawnLayer,
+} from "@/components/map/main-map";
 import { Input } from "@/components/ui/input";
 import {
     Select,
@@ -12,10 +14,16 @@ import {
     SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { calculateLuminance } from "@/utils/helper-fn";
-import type { RouteDetail, RouteSummary } from "@/utils/types/gtfs";
+import { calculateLuminance, removeOppStopPrefix } from "@/utils/helper-fn";
+import type {
+    RouteDetail,
+    RouteStop,
+    RouteSummary,
+    StationDetail,
+} from "@/utils/types/gtfs";
+import { ArrowLeft, MapPin } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export default function Index() {
     const [selectedMode, setSelectedMode] = useState<string>("Transjakarta");
@@ -32,6 +40,12 @@ export default function Index() {
 
     // Mobile bottom-sheet height. Ignored at md+ where the sidebar is a column.
     const [sheetOpen, setSheetOpen] = useState(false);
+
+    // Stop view: the clicked station, plus every route that calls there.
+    const [station, setStation] = useState<StationDetail | null>(null);
+    const [stationLoading, setStationLoading] = useState(false);
+    const [stationError, setStationError] = useState<string | null>(null);
+    const [stationRoutes, setStationRoutes] = useState<RouteDetail[]>([]);
 
     // Load the lightweight index once (~41 KB). Geometry is fetched per route.
     useEffect(() => {
@@ -100,6 +114,111 @@ export default function Index() {
 
         return () => ctrl.abort();
     }, [selectedRouteId]);
+
+    /**
+     * Clicking a stop switches the map into "station mode": draw every route
+     * that calls there, each in its own colour. Worst case in the current feed
+     * is 14 routes (~290 KB); the median stop serves 1.
+     */
+    const stationAbortRef = useRef<AbortController | null>(null);
+
+    const handleStopClick = useCallback(async (stop: RouteStop) => {
+        stationAbortRef.current?.abort();
+        const ctrl = new AbortController();
+        stationAbortRef.current = ctrl;
+
+        // The station id is derived from the clustered name + centroid, which
+        // the client cannot know exactly, so resolve by name and coordinate.
+        const name = removeOppStopPrefix(stop.stop_name);
+        const query = new URLSearchParams({
+            name,
+            lat: String(stop.stop_lat),
+            lon: String(stop.stop_lon),
+        });
+
+        setStationLoading(true);
+        setStationError(null);
+        setSheetOpen(true);
+
+        try {
+            const res = await fetch(`/api/gtfs/stops/resolve?${query}`, {
+                signal: ctrl.signal,
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const detail: StationDetail = await res.json();
+            if (ctrl.signal.aborted) return;
+
+            setStation(detail);
+            setSelectedRouteId(null);
+
+            // Fetch each route's geometry in parallel.
+            const results = await Promise.all(
+                detail.routes.map(async (r) => {
+                    const g = await fetch(
+                        `/api/gtfs/routes/${encodeURIComponent(r.route_id)}`,
+                        { signal: ctrl.signal }
+                    );
+                    if (!g.ok) return null;
+                    return (await g.json()) as RouteDetail;
+                })
+            );
+            if (ctrl.signal.aborted) return;
+            setStationRoutes(results.filter((r): r is RouteDetail => !!r));
+        } catch (err) {
+            if ((err as Error).name === "AbortError") return;
+            console.error("Failed to load stop:", err);
+            setStationError("Gagal memuat halte ini.");
+        } finally {
+            if (!ctrl.signal.aborted) setStationLoading(false);
+        }
+    }, []);
+
+    const clearStation = useCallback(() => {
+        stationAbortRef.current?.abort();
+        setStation(null);
+        setStationRoutes([]);
+        setStationError(null);
+        setStationLoading(false);
+    }, []);
+
+    // What the map draws: the station's routes when a stop is open, otherwise
+    // the single selected route.
+    const layers: DrawnLayer[] = useMemo(() => {
+        if (station) {
+            return stationRoutes.map((r) => ({
+                id: r.route_id,
+                color: r.route_color,
+                geometry: r.geometry,
+            }));
+        }
+        if (detail) {
+            return [
+                {
+                    id: detail.route_id,
+                    color: detail.route_color,
+                    geometry: detail.geometry,
+                },
+            ];
+        }
+        return [];
+    }, [station, stationRoutes, detail]);
+
+    // Stops shown as pins: every stop of every drawn route, de-duplicated.
+    const visibleStops: RouteStop[] = useMemo(() => {
+        if (station) {
+            const seen = new Set<string>();
+            const out: RouteStop[] = [];
+            for (const r of stationRoutes) {
+                for (const s of r.stops) {
+                    if (seen.has(s.stop_id)) continue;
+                    seen.add(s.stop_id);
+                    out.push(s);
+                }
+            }
+            return out;
+        }
+        return detail?.stops ?? [];
+    }, [station, stationRoutes, detail]);
 
     // Derived state belongs in useMemo, not in a useEffect + setState pair.
     const filteredRoutes = useMemo(() => {
@@ -191,7 +310,20 @@ export default function Index() {
                     </div>
 
                     <div className="flex-1 overflow-y-auto pl-4 pr-4 pb-4">
-                        {routesLoading && <RouteListSkeleton />}
+                        {station && (
+                            <StopPanel
+                                station={station}
+                                loading={stationLoading}
+                                error={stationError}
+                                onBack={clearStation}
+                                onPickRoute={(id) => {
+                                    clearStation();
+                                    setSelectedRouteId(id);
+                                }}
+                            />
+                        )}
+
+                        {!station && routesLoading && <RouteListSkeleton />}
 
                         {routesError && (
                             <div className="text-sm text-red-200 bg-red-900/40 rounded p-3">
@@ -199,7 +331,8 @@ export default function Index() {
                             </div>
                         )}
 
-                        {!routesLoading &&
+                        {!station &&
+                            !routesLoading &&
                             !routesError &&
                             filteredRoutes.length === 0 && (
                                 <div className="text-sm text-white/60 p-2">
@@ -208,7 +341,8 @@ export default function Index() {
                                 </div>
                             )}
 
-                        {!routesLoading &&
+                        {!station &&
+                            !routesLoading &&
                             filteredRoutes.map((r) => {
                                 const isSelected = selectedRouteId === r.route_id;
                                 return (
@@ -226,6 +360,7 @@ export default function Index() {
                                                   "hover:bg-white/10"
                                         }`}
                                         onClick={() => {
+                                            clearStation();
                                             setSelectedRouteId(
                                                 isSelected ? null : r.route_id
                                             );
@@ -269,11 +404,99 @@ export default function Index() {
 
             <div className="order-1 min-h-0 w-full flex-1 md:order-2 md:h-full md:flex-none">
                 <MainMapComponent
-                    geometry={detail?.geometry ?? null}
-                    lineColor={detail?.route_color}
-                    routeStops={detail?.stops ?? []}
+                    layers={layers}
+                    routeStops={visibleStops}
+                    activeStop={
+                        station
+                            ? {
+                                  lat: station.lat,
+                                  lon: station.lon,
+                                  name: station.name,
+                              }
+                            : null
+                    }
+                    onStopClick={handleStopClick}
                 />
             </div>
+        </div>
+    );
+}
+
+/**
+ * Replaces the route list while a stop is open: the station name and every
+ * route calling there, each clickable to switch back to single-route view.
+ */
+function StopPanel({
+    station,
+    loading,
+    error,
+    onBack,
+    onPickRoute,
+}: {
+    station: StationDetail;
+    loading: boolean;
+    error: string | null;
+    onBack: () => void;
+    onPickRoute: (routeId: string) => void;
+}) {
+    return (
+        <div className="-ml-4 -mr-4">
+            <div className="flex items-start gap-2 px-4 pb-3">
+                <button
+                    type="button"
+                    onClick={onBack}
+                    aria-label="Kembali ke daftar rute"
+                    className="mt-0.5 shrink-0 rounded p-1 hover:bg-white/10"
+                >
+                    <ArrowLeft size={18} />
+                </button>
+                <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-xs text-white/60">
+                        <MapPin size={12} />
+                        Halte
+                        {station.platforms > 1 &&
+                            ` \u00b7 ${station.platforms} peron`}
+                    </div>
+                    <h2 className="text-lg leading-tight font-bold font-pt-sans">
+                        {station.name}
+                    </h2>
+                    <p className="mt-0.5 text-xs text-white/60">
+                        {station.routes.length} rute berhenti di sini
+                        {loading && " \u00b7 memuat peta\u2026"}
+                    </p>
+                </div>
+            </div>
+
+            {error && (
+                <div className="mx-4 rounded bg-red-900/40 p-3 text-sm text-red-200">
+                    {error}
+                </div>
+            )}
+
+            <Separator className="opacity-20" />
+
+            {station.routes.map((r) => (
+                <button
+                    key={r.route_id}
+                    type="button"
+                    onClick={() => onPickRoute(r.route_id)}
+                    className="flex w-full cursor-pointer items-center gap-2 p-2 pr-4 pl-4 text-left text-white transition-colors hover:bg-white/10"
+                >
+                    <div
+                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold font-pt-sans-narrow"
+                        style={{
+                            backgroundColor: `#${r.route_color}`,
+                            color:
+                                calculateLuminance(r.route_color) > 0.5
+                                    ? "black"
+                                    : "white",
+                        }}
+                    >
+                        {r.route_short_name}
+                    </div>
+                    <div className="flex-1 font-pt-sans">{r.route_long_name}</div>
+                </button>
+            ))}
         </div>
     );
 }

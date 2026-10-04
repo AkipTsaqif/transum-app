@@ -1,6 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { RouteDetail, RouteSummary } from "@/utils/types/gtfs";
+import type {
+    RouteDetail,
+    RouteSummary,
+    StationDetail,
+    StationIndexEntry,
+} from "@/utils/types/gtfs";
 
 const DATA_DIR = path.join(process.cwd(), "data", "gtfs");
 
@@ -43,6 +48,99 @@ export async function getRouteDetail(
         if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
         throw err;
     }
+}
+
+let stationCache: Map<string, StationIndexEntry> | null = null;
+
+async function getStationIndex(): Promise<Map<string, StationIndexEntry>> {
+    if (stationCache) return stationCache;
+
+    const raw = await fs.readFile(path.join(DATA_DIR, "stops.json"), "utf-8");
+    const list = JSON.parse(raw) as StationIndexEntry[];
+    stationCache = new Map(list.map((s) => [s.id, s]));
+    return stationCache;
+}
+
+async function expand(
+    station: StationIndexEntry | undefined
+): Promise<StationDetail | null> {
+    if (!station) return null;
+
+    const routes = await getRouteIndex();
+    const byId = new Map(routes.map((r) => [r.route_id, r]));
+
+    return {
+        id: station.id,
+        name: station.name,
+        lat: station.lat,
+        lon: station.lon,
+        platforms: station.platforms,
+        routes: station.routes
+            .map((id) => byId.get(id))
+            .filter((r): r is RouteSummary => Boolean(r))
+            .sort((a, b) =>
+                a.route_short_name.localeCompare(b.route_short_name, "en", {
+                    numeric: true,
+                })
+            ),
+    };
+}
+
+/**
+ * A station plus the full summary of every route that calls there.
+ *
+ * The 922 KB station index is read once per server process and kept in memory;
+ * clients only ever receive the single ~1-3 KB station they asked for.
+ */
+export async function getStationDetail(
+    stationId: string
+): Promise<StationDetail | null> {
+    const stations = await getStationIndex();
+    return expand(stations.get(stationId));
+}
+
+/** Metres between two lat/lon pairs. */
+function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
+    const R = 6371e3;
+    const p1 = (lat1 * Math.PI) / 180;
+    const p2 = (lat2 * Math.PI) / 180;
+    const dp = ((lat2 - lat1) * Math.PI) / 180;
+    const dl = ((lon2 - lon1) * Math.PI) / 180;
+    const a =
+        Math.sin(dp / 2) ** 2 +
+        Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * Finds the clustered station containing a raw GTFS stop. Matches on base name
+ * first, then nearest centroid -- the same name can legitimately appear in
+ * several parts of the city.
+ */
+export async function resolveStation(
+    name: string,
+    lat: number,
+    lon: number
+): Promise<StationDetail | null> {
+    const stations = await getStationIndex();
+
+    let best: StationIndexEntry | undefined;
+    let bestDist = Infinity;
+
+    for (const s of stations.values()) {
+        if (s.name !== name) continue;
+        const d = haversine(lat, lon, s.lat, s.lon);
+        if (d < bestDist) {
+            bestDist = d;
+            best = s;
+        }
+    }
+
+    // Generous ceiling: the cluster centroid can sit a little way from any one
+    // platform, but a match kilometres away means we picked the wrong station.
+    if (!best || bestDist > 500) return null;
+
+    return expand(best);
 }
 
 export async function getSyncMeta() {

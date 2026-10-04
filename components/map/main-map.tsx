@@ -69,10 +69,19 @@ const MAP_STYLE: string | StyleSpecification = process.env
     ? `https://api.maptiler.com/maps/streets/style.json?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}`
     : OSM_FALLBACK_STYLE;
 
+export interface DrawnLayer {
+    id: string;
+    color: string;
+    geometry: ShapeCollection;
+}
+
 interface MainMapComponentProps {
-    geometry: ShapeCollection | null;
-    lineColor: string | undefined;
+    /** One entry per route to draw. Multiple when a stop is selected. */
+    layers: DrawnLayer[];
     routeStops: RouteStop[];
+    /** Pin for the currently selected station, if any. */
+    activeStop?: { lat: number; lon: number; name: string } | null;
+    onStopClick?: (stop: RouteStop) => void;
 }
 
 interface Cluster {
@@ -80,6 +89,8 @@ interface Cluster {
     lon: number;
     count: number;
     name: string;
+    /** A representative member, used to resolve the station on click. */
+    stop: RouteStop;
 }
 
 /**
@@ -142,7 +153,8 @@ function clusterStops(stops: RouteStop[], nearbyThreshold: number): Cluster[] {
             break;
         }
 
-        if (!merged) clusters.push({ lat, lon, count: 1, name });
+        if (!merged)
+            clusters.push({ lat, lon, count: 1, name, stop });
     }
 
     return clusters;
@@ -152,10 +164,14 @@ const StopMarkers = React.memo(function StopMarkers({
     stops,
     showLabels,
     nearbyThreshold,
+    activeName,
+    onStopClick,
 }: {
     stops: RouteStop[];
     showLabels: boolean;
     nearbyThreshold: number;
+    activeName?: string | null;
+    onStopClick?: (stop: RouteStop) => void;
 }) {
     // Clustering is O(n^2); keep it out of the render path on every pan.
     const clusters = useMemo(
@@ -165,35 +181,55 @@ const StopMarkers = React.memo(function StopMarkers({
 
     return (
         <>
-            {clusters.map((c) => (
-                <Marker
-                    key={`${c.name}:${c.lat.toFixed(5)},${c.lon.toFixed(5)}`}
-                    latitude={c.lat}
-                    longitude={c.lon}
-                    anchor="center"
-                >
-                    <div className="bg-jakarta p-1 rounded-full">
-                        <BusFront
-                            size={10}
-                            strokeWidth={2}
-                            className="text-white"
-                        />
-                    </div>
-                    {showLabels && (
-                        <div className="absolute top-0 left-[2em] leading-none w-24 rounded-sm text-xs font-pt-sans-narrow font-bold">
-                            {c.name}
-                        </div>
-                    )}
-                </Marker>
-            ))}
+            {clusters.map((c) => {
+                const isActive = activeName === c.name;
+                return (
+                    <Marker
+                        key={`${c.name}:${c.lat.toFixed(5)},${c.lon.toFixed(5)}`}
+                        latitude={c.lat}
+                        longitude={c.lon}
+                        anchor="center"
+                        onClick={(e) => {
+                            // Without this the map swallows the click and pans.
+                            e.originalEvent.stopPropagation();
+                            onStopClick?.(c.stop);
+                        }}
+                    >
+                        <button
+                            type="button"
+                            aria-label={`Halte ${c.name}`}
+                            title={c.name}
+                            className={`flex cursor-pointer items-center justify-center rounded-full transition-transform hover:scale-125 ${
+                                isActive
+                                    ? "bg-white p-1.5 ring-2 ring-jakarta"
+                                    : "bg-jakarta p-1"
+                            }`}
+                        >
+                            <BusFront
+                                size={isActive ? 13 : 10}
+                                strokeWidth={2}
+                                className={
+                                    isActive ? "text-jakarta" : "text-white"
+                                }
+                            />
+                        </button>
+                        {(showLabels || isActive) && (
+                            <div className="pointer-events-none absolute top-0 left-[2em] w-24 rounded-sm text-xs leading-none font-bold font-pt-sans-narrow">
+                                {c.name}
+                            </div>
+                        )}
+                    </Marker>
+                );
+            })}
         </>
     );
 });
 
 const MainMapComponent = ({
-    geometry,
-    lineColor = "FFFFFF",
+    layers,
     routeStops,
+    activeStop,
+    onStopClick,
 }: MainMapComponentProps) => {
     // Auto-fit frames a whole route at roughly z11-z13, so the old "> 12"
     // marker gate hid every stop the moment fitBounds finished. Pins are cheap
@@ -219,7 +255,23 @@ const MainMapComponent = ({
         });
     }, []);
 
-    const bounds = useMemo(() => geometryBounds(geometry), [geometry]);
+    // Union of every drawn layer, so a multi-route stop view frames them all.
+    const bounds = useMemo(() => {
+        const boxes = layers
+            .map((l) => geometryBounds(l.geometry))
+            .filter((b): b is [[number, number], [number, number]] =>
+                Boolean(b)
+            );
+        if (!boxes.length) return null;
+
+        return boxes.reduce(
+            (acc, b) => [
+                [Math.min(acc[0][0], b[0][0]), Math.min(acc[0][1], b[0][1])],
+                [Math.max(acc[1][0], b[1][0]), Math.max(acc[1][1], b[1][1])],
+            ],
+            boxes[0]
+        ) as LngLatBoundsLike;
+    }, [layers]);
 
     // Frame the selected route. Depends on `bounds` (not `geometry`) so
     // re-selecting a route with identical extent does not re-animate.
@@ -254,23 +306,45 @@ const MainMapComponent = ({
         >
             <NavigationControl position="bottom-right" />
 
-            <Source id="shape" type="geojson" data={geometry ?? EMPTY_GEOJSON}>
-                <Layer
-                    id="shape-line"
-                    type="line"
-                    layout={{ "line-join": "round", "line-cap": "round" }}
-                    paint={{
-                        "line-color": `#${lineColor}`,
-                        "line-width": 3,
-                    }}
-                />
-            </Source>
+            {/* A Source per route so each keeps its own colour. */}
+            {layers.length === 0 ? (
+                <Source id="shape-empty" type="geojson" data={EMPTY_GEOJSON}>
+                    <Layer id="shape-line" type="line" />
+                </Source>
+            ) : (
+                layers.map((l) => (
+                    <Source
+                        key={l.id}
+                        id={`shape-${l.id}`}
+                        type="geojson"
+                        data={l.geometry}
+                    >
+                        <Layer
+                            id={`shape-line-${l.id}`}
+                            type="line"
+                            layout={{
+                                "line-join": "round",
+                                "line-cap": "round",
+                            }}
+                            paint={{
+                                "line-color": `#${l.color}`,
+                                "line-width": 3,
+                                // Slight transparency so overlapping corridors
+                                // stay legible when many routes share a street.
+                                "line-opacity": layers.length > 1 ? 0.75 : 1,
+                            }}
+                        />
+                    </Source>
+                ))
+            )}
 
             {zoomLevel > zoomThreshold && routeStops.length > 0 && (
                 <StopMarkers
                     stops={routeStops}
                     showLabels={zoomLevel >= labelThreshold}
                     nearbyThreshold={nearbyThreshold}
+                    activeName={activeStop?.name ?? null}
+                    onStopClick={onStopClick}
                 />
             )}
         </MapGL>

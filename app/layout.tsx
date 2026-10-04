@@ -36,18 +36,10 @@ export const metadata = {
         "Jelajahi rute dan halte Transjakarta di peta. Data GTFS resmi dari PT Transportasi Jakarta.",
 };
 
-/**
- * `route` and `stop` are parallel-route slots (app/@route, app/@stop).
- * Next.js passes slots to the layout, not to the page.
- */
 export default function RootLayout({
     children,
-    route,
-    stop,
 }: {
     children: React.ReactNode;
-    route: React.ReactNode;
-    stop: React.ReactNode;
 }) {
     return (
         <html
@@ -70,10 +62,6 @@ export default function RootLayout({
                         </div>
                         <div className="flex min-h-0 w-full flex-1 flex-col">
                             {children}
-                            <div className="flex gap-2 absolute top-0 right-0 z-9998">
-                                {route}
-                                {stop}
-                            </div>
                         </div>
                     </main>
                 </ThemeProvider>

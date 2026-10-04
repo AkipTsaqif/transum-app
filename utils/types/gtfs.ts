@@ -48,3 +48,40 @@ export interface RouteDetail {
     geometry: ShapeCollection;
     stops: RouteStop[];
 }
+
+/**
+ * A clustered station: one or more physical platforms sharing a base name
+ * within ~55 m, e.g. a stop and its "Sbr." twin across the road. This is the
+ * unit the map renders as a single pin.
+ *
+ * Server-side only -- the full index is 922 KB and never shipped to the client.
+ */
+export interface StationIndexEntry {
+    id: string;
+    name: string;
+    lat: number;
+    lon: number;
+    platforms: number;
+    /** route_ids calling at this station. */
+    routes: string[];
+}
+
+/** What `/api/gtfs/stops/:id` returns: ~1-3 KB. */
+export interface StationDetail {
+    id: string;
+    name: string;
+    lat: number;
+    lon: number;
+    platforms: number;
+    routes: RouteSummary[];
+}
+
+/** A route drawn on the map, paired with the colour to draw it in. */
+export interface DrawnRoute {
+    route_id: string;
+    route_short_name: string;
+    route_long_name: string;
+    route_color: string;
+    geometry: ShapeCollection;
+    stops: RouteStop[];
+}

@@ -31,6 +31,13 @@ const DATA_DIR = path.join(process.cwd(), "data", "gtfs");
 const ROUTES_DIR = path.join(DATA_DIR, "routes");
 const META_PATH = path.join(DATA_DIR, ".meta.json");
 
+/**
+ * Stops closer than this that share a base name are treated as one physical
+ * station -- a stop and its "Sbr." (across-the-road) twin, or two platforms of
+ * the same corridor. Must match the map's clustering distance.
+ */
+const CLUSTER_RADIUS_M = 55;
+
 /** Be a good citizen: upstream is a single ageing box serving a public good. */
 const USER_AGENT =
   "transum-app/0.1 (+https://github.com/transum-app) gtfs-sync";
@@ -128,6 +135,31 @@ async function hasBakedData(): Promise<boolean> {
  */
 export const routeFileName = (routeId: string) =>
     `${encodeURIComponent(routeId)}.json`;
+
+/** Metres between two lat/lon pairs. */
+function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
+    const R = 6371e3;
+    const p1 = (lat1 * Math.PI) / 180;
+    const p2 = (lat2 * Math.PI) / 180;
+    const dp = ((lat2 - lat1) * Math.PI) / 180;
+    const dl = ((lon2 - lon1) * Math.PI) / 180;
+    const a =
+        Math.sin(dp / 2) ** 2 +
+        Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * Strips the "Sbr." (seberang / opposite side) prefix. Mirrors
+ * utils/helper-fn.ts -- duplicated because this script must run standalone at
+ * build time without pulling in the app's module graph.
+ */
+const stripOppositePrefix = (name: string) =>
+    (name ?? "").replace(/^Sbr\.\s*/i, "").trim();
+
+/** Stable, URL-safe id for a clustered station. */
+const stationId = (name: string, lat: number, lon: number) =>
+    `${name}@${lat.toFixed(5)},${lon.toFixed(5)}`;
 
 // ----------------------------------------------------------------------- main
 
@@ -331,6 +363,99 @@ async function main() {
         );
     }
 
+    // ---------------------------------------------------------------- stations
+    //
+    // Group stops into the same clusters the map renders, then record which
+    // routes serve each one. This is what makes "click a stop, see every route
+    // that calls there" a single small fetch instead of a scan over all routes.
+
+    interface Station {
+        name: string;
+        lat: number;
+        lon: number;
+        count: number;
+        stopIds: string[];
+        routes: Set<string>;
+    }
+
+    // Bucket by base name first; clustering only ever merges same-named stops,
+    // so this keeps the distance comparison near-linear instead of O(n^2).
+    const byName = new Map<string, Station[]>();
+
+    const routeIdsByStop = new Map<string, Set<string>>();
+    for (const r of routes) {
+        for (const t of tripsByRoute.get(r.route_id) ?? []) {
+            for (const st of stopTimesByTrip.get(t.trip_id) ?? []) {
+                const set = routeIdsByStop.get(st.stop_id);
+                if (set) set.add(r.route_id);
+                else routeIdsByStop.set(st.stop_id, new Set([r.route_id]));
+            }
+        }
+    }
+
+    for (const s of stops) {
+        const lat = Number(s.stop_lat);
+        const lon = Number(s.stop_lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+        const serving = routeIdsByStop.get(s.stop_id);
+        if (!serving?.size) continue; // orphan stop, no route calls here
+
+        const name = stripOppositePrefix(s.stop_name);
+        const bucket = byName.get(name) ?? [];
+
+        let merged = false;
+        for (const st of bucket) {
+            if (haversine(lat, lon, st.lat, st.lon) >= CLUSTER_RADIUS_M) continue;
+            st.lat = (st.lat * st.count + lat) / (st.count + 1);
+            st.lon = (st.lon * st.count + lon) / (st.count + 1);
+            st.count += 1;
+            st.stopIds.push(s.stop_id);
+            for (const r of serving) st.routes.add(r);
+            merged = true;
+            break;
+        }
+
+        if (!merged) {
+            bucket.push({
+                name,
+                lat,
+                lon,
+                count: 1,
+                stopIds: [s.stop_id],
+                routes: new Set(serving),
+            });
+            byName.set(name, bucket);
+        }
+    }
+
+    const stations = [...byName.values()].flat();
+
+    // One index file rather than 6437 tiny ones: the whole thing is ~830 KB
+    // raw / ~90 KB gzipped, cheaper to serve once than to pay a request per
+    // stop, and it avoids adding thousands of near-empty objects to git.
+    // Route metadata is already in routes.json, so only ids are stored here.
+    const stationIndex = stations.map((st) => ({
+        id: stationId(st.name, st.lat, st.lon),
+        name: st.name,
+        lat: round(st.lat),
+        lon: round(st.lon),
+        platforms: st.count,
+        routes: [...st.routes].sort(),
+    }));
+
+    await fs.writeFile(
+        path.join(DATA_DIR, "stops.json"),
+        JSON.stringify(stationIndex)
+    );
+
+    const stationRouteCounts = stationIndex.map((s) => s.routes.length);
+    console.log(
+        `\u2713 Baked ${stations.length} stations ` +
+            `(index ${(JSON.stringify(stationIndex).length / 1024).toFixed(0)} KB, ` +
+            `max ${Math.max(...stationRouteCounts)} routes at one stop)`
+    );
+
     const meta: SyncMeta = {
         etag: res.headers.get("etag"),
         lastModified: res.headers.get("last-modified"),
@@ -340,6 +465,7 @@ async function main() {
             routes: routes.length,
             trips: trips.length,
             stops: stops.length,
+            stations: stations.length,
             shapePoints: shapes.length,
             stopTimes: stopTimes.length,
         },
