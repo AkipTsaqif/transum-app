@@ -614,6 +614,29 @@ async function main() {
             `${(overview.length / 1048576).toFixed(2)} MB raw`
     );
 
+    // Every station as a Point layer, for the "show all stops when zoomed in"
+    // view. Rendered by the GPU as circles, so 6,437 points cost one draw call
+    // -- the same count as DOM markers would be 6,437 React components and an
+    // O(n^2) clustering pass.
+    //
+    // Only name and id travel: enough to label a pin and resolve a click.
+    const stopsGeoJson = JSON.stringify({
+        type: "FeatureCollection",
+        features: stationIndex.map((s) => ({
+            type: "Feature",
+            properties: { name: s.name, routes: s.routes.length },
+            geometry: { type: "Point", coordinates: [s.lon, s.lat] },
+        })),
+    });
+    await fs.writeFile(
+        path.join(DATA_DIR, "stops-geo.json"),
+        stopsGeoJson
+    );
+    console.log(
+        `\u2713 Baked stop layer: ${stationIndex.length} points, ` +
+            `${(stopsGeoJson.length / 1048576).toFixed(2)} MB raw`
+    );
+
     const stationRouteCounts = stationIndex.map((s) => s.routes.length);
     console.log(
         `\u2713 Baked ${stations.length} stations ` +

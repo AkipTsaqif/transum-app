@@ -170,6 +170,20 @@ export async function getOverview(): Promise<ShapeCollection> {
     return overviewCache;
 }
 
+let stopLayerCache: unknown = null;
+
+/** Every station as GeoJSON points, for the zoomed-in all-stops layer. */
+export async function getStopLayer(): Promise<unknown> {
+    if (stopLayerCache) return stopLayerCache;
+
+    const raw = await fs.readFile(
+        path.join(DATA_DIR, "stops-geo.json"),
+        "utf-8"
+    );
+    stopLayerCache = JSON.parse(raw);
+    return stopLayerCache;
+}
+
 export async function getSyncMeta() {
     try {
         return JSON.parse(

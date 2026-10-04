@@ -13,6 +13,7 @@ import {
     type StyleSpecification,
 } from "maplibre-gl";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FeatureCollection, Point } from "geojson";
 import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
 import { BusFront } from "lucide-react";
 import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
@@ -37,37 +38,26 @@ const EMPTY_GEOJSON: ShapeCollection = {
 };
 
 /**
- * Keyless fallback basemap: OpenStreetMap raster tiles.
+ * Basemap. Default is OpenFreeMap "Positron": a desaturated grey-and-white
+ * style with no key, no signup and no rate limit.
  *
- * NOT `demotiles.maplibre.org` -- that style is a world *political* map with
- * only country outlines and a #D8F2FF background, so at city zoom it is an
- * empty pale-blue canvas with no streets. It looks broken for a transit map.
+ * Standard OSM raster was too busy -- its red/orange arterials and green parks
+ * compete directly with the route colours drawn on top, so a red BRT corridor
+ * disappeared into the road beneath it. Positron pushes the basemap back to
+ * near-greyscale, which is the conventional choice for data overlays.
  *
- * OSM tiles need no key, but do have a usage policy (no heavy/commercial
- * traffic): https://operations.osmfoundation.org/policies/tiles/
- * Set NEXT_PUBLIC_MAPTILER_KEY for production.
+ * Rejected: CARTO Positron/Voyager return HTTP 200 with an "API KEY REQUIRED"
+ * watermark tile rather than a 4xx, so they look fine to a status check and
+ * broken on screen. Stadia's equivalents return a real 401.
+ *
+ * MapTiler is still used when a key is present.
  */
-const OSM_FALLBACK_STYLE: StyleSpecification = {
-    version: 8,
-    sources: {
-        osm: {
-            type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            tileSize: 256,
-            maxzoom: 19,
-            attribution:
-                '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        },
-    },
-    layers: [
-        { id: "osm", type: "raster", source: "osm" },
-    ],
-};
+const OPENFREEMAP_POSITRON = "https://tiles.openfreemap.org/styles/positron";
 
 const MAP_STYLE: string | StyleSpecification = process.env
     .NEXT_PUBLIC_MAPTILER_KEY
-    ? `https://api.maptiler.com/maps/streets/style.json?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}`
-    : OSM_FALLBACK_STYLE;
+    ? `https://api.maptiler.com/maps/dataviz/style.json?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}`
+    : OPENFREEMAP_POSITRON;
 
 export interface DrawnLayer {
     id: string;
@@ -81,6 +71,11 @@ interface MainMapComponentProps {
     routeStops: RouteStop[];
     /** Every route, faint, shown only when nothing is selected. */
     overview?: ShapeCollection | null;
+    /** Every station as points; GPU-rendered above `allStopsZoom`. */
+    allStops?: FeatureCollection | null;
+    onStationClick?: (name: string, lat: number, lon: number) => void;
+    /** Fired the first time the user crosses into all-stops territory. */
+    onNeedAllStops?: () => void;
     /** Pin for the currently selected station, if any. */
     activeStop?: { lat: number; lon: number; name: string } | null;
     onStopClick?: (stop: RouteStop) => void;
@@ -231,8 +226,11 @@ const MainMapComponent = ({
     layers,
     routeStops,
     overview,
+    allStops,
     activeStop,
     onStopClick,
+    onStationClick,
+    onNeedAllStops,
 }: MainMapComponentProps) => {
     // Auto-fit frames a whole route at roughly z11-z13, so the old "> 12"
     // marker gate hid every stop the moment fitBounds finished. Pins are cheap
@@ -241,6 +239,8 @@ const MainMapComponent = ({
     const zoomThreshold = 10;
     const labelThreshold = 13;
     const nearbyThreshold = 55;
+    /** Below this, 6,437 pins would be an unreadable smear. */
+    const allStopsZoom = 14;
 
     const mapRef = useRef<MapRef | null>(null);
 
@@ -257,6 +257,12 @@ const MainMapComponent = ({
             return next === prev ? prev : next;
         });
     }, []);
+
+    // Ask for the stop layer the first time it could actually be shown, so a
+    // visitor who never zooms in never downloads it.
+    useEffect(() => {
+        if (zoomLevel >= allStopsZoom) onNeedAllStops?.();
+    }, [zoomLevel, allStopsZoom, onNeedAllStops]);
 
     // Union of every drawn layer, so a multi-route stop view frames them all.
     const bounds = useMemo(() => {
@@ -296,6 +302,24 @@ const MainMapComponent = ({
     return (
         <MapGL
             ref={mapRef}
+            // Clicking a GPU circle layer: hit-test by layer id, since these
+            // are painted pixels rather than DOM nodes with their own handlers.
+            interactiveLayerIds={
+                allStops && zoomLevel >= allStopsZoom
+                    ? ["all-stops-circle"]
+                    : undefined
+            }
+            onClick={(e) => {
+                const f = e.features?.[0];
+                if (!f || f.layer?.id !== "all-stops-circle") return;
+                const [lon, lat] = (f.geometry as Point).coordinates;
+                onStationClick?.(
+                    String(f.properties?.name ?? ""),
+                    lat,
+                    lon
+                );
+            }}
+            cursor={"auto"}
             initialViewState={{
                 latitude: -6.1907,
                 longitude: 106.8228,
@@ -370,6 +394,53 @@ const MainMapComponent = ({
                         />
                     </Source>
                 ))
+            )}
+
+            {/*
+              All stops, GPU-rendered. Only above `allStopsZoom`, where pins
+              are far enough apart to read. 6,437 DOM markers would instead be
+              6,437 React components plus an O(n^2) clustering pass.
+            */}
+            {allStops && zoomLevel >= allStopsZoom && (
+                <Source id="all-stops" type="geojson" data={allStops}>
+                    <Layer
+                        id="all-stops-circle"
+                        type="circle"
+                        paint={{
+                            "circle-radius": [
+                                "interpolate",
+                                ["linear"],
+                                ["zoom"],
+                                14,
+                                2.5,
+                                17,
+                                5,
+                            ],
+                            "circle-color": "#0C1B2A",
+                            "circle-stroke-width": 1.5,
+                            "circle-stroke-color": "#FFFFFF",
+                            "circle-opacity": 0.9,
+                        }}
+                    />
+                    <Layer
+                        id="all-stops-label"
+                        type="symbol"
+                        minzoom={15}
+                        layout={{
+                            "text-field": ["get", "name"],
+                            "text-size": 11,
+                            "text-offset": [0, 1.1],
+                            "text-anchor": "top",
+                            "text-max-width": 9,
+                            "text-allow-overlap": false,
+                        }}
+                        paint={{
+                            "text-color": "#0C1B2A",
+                            "text-halo-color": "#FFFFFF",
+                            "text-halo-width": 1.5,
+                        }}
+                    />
+                </Source>
             )}
 
             {zoomLevel > zoomThreshold && routeStops.length > 0 && (

@@ -22,6 +22,7 @@ import type {
     ShapeCollection,
     StationDetail,
 } from "@/utils/types/gtfs";
+import type { FeatureCollection } from "geojson";
 import { ArrowLeft, MapPin } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -45,6 +46,8 @@ export default function Index() {
     // Stop view: the clicked station, plus every route that calls there.
     // Faint city-wide network, shown only when nothing is selected.
     const [overview, setOverview] = useState<ShapeCollection | null>(null);
+    // Every stop as points; fetched lazily the first time the user zooms in.
+    const [allStops, setAllStops] = useState<FeatureCollection | null>(null);
 
     const [station, setStation] = useState<StationDetail | null>(null);
     const [stationLoading, setStationLoading] = useState(false);
@@ -197,6 +200,47 @@ export default function Index() {
             if (!ctrl.signal.aborted) setStationLoading(false);
         }
     }, []);
+
+    /**
+     * Fetched on demand: only a visitor who zooms in far enough pays for it.
+     * The ref guards against the map firing this on every zoom change.
+     */
+    const stopsRequested = useRef(false);
+
+    const loadAllStops = useCallback(() => {
+        if (stopsRequested.current) return;
+        stopsRequested.current = true;
+
+        (async () => {
+            try {
+                const res = await fetch("/api/gtfs/stops/geo");
+                if (!res.ok) return;
+                setAllStops((await res.json()) as FeatureCollection);
+            } catch {
+                // Non-fatal: zooming in simply shows no extra pins.
+                stopsRequested.current = false;
+            }
+        })();
+    }, []);
+
+    /**
+     * Resolve a station clicked on the GPU stop layer. Same path as a marker
+     * click, but the layer only carries name + coordinates.
+     */
+    const handleStationClick = useCallback(
+        (name: string, lat: number, lon: number) => {
+            void handleStopClick({
+                stop_id: "",
+                stop_name: name,
+                stop_lat: lat,
+                stop_lon: lon,
+                sequence: 0,
+            });
+        },
+        // handleStopClick is stable (useCallback with [] deps).
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        []
+    );
 
     const clearStation = useCallback(() => {
         stationAbortRef.current?.abort();
@@ -427,11 +471,21 @@ export default function Index() {
                 </div>
             </aside>
 
-            <div className="order-1 min-h-0 w-full flex-1 md:order-2 md:h-full md:flex-none">
+            {/*
+              min-w-0 + flex-1 is load-bearing. With `w-full md:flex-none` the
+              map kept a full-viewport width *next to* the 384px sidebar, so it
+              overflowed by exactly that much and its centre sat ~192px right
+              of the visible area -- about 29 km west at zoom 10, which put
+              Tangerang in the middle of the screen instead of Jakarta.
+            */}
+            <div className="order-1 min-h-0 w-full min-w-0 flex-1 md:order-2 md:h-full">
                 <MainMapComponent
                     layers={layers}
                     routeStops={visibleStops}
                     overview={overview}
+                    allStops={allStops}
+                    onStationClick={handleStationClick}
+                    onNeedAllStops={loadAllStops}
                     activeStop={
                         station
                             ? {
