@@ -30,6 +30,9 @@ export default function Index() {
     const [detailLoading, setDetailLoading] = useState(false);
     const [detailError, setDetailError] = useState<string | null>(null);
 
+    // Mobile bottom-sheet height. Ignored at md+ where the sidebar is a column.
+    const [sheetOpen, setSheetOpen] = useState(false);
+
     // Load the lightweight index once (~41 KB). Geometry is fetched per route.
     useEffect(() => {
         let cancelled = false;
@@ -110,13 +113,40 @@ export default function Index() {
     }, [routes, searchQuery]);
 
     return (
-        <div className="flex w-full relative">
-            <div className="w-96 flex flex-col bg-jakarta text-white h-screen">
-                <div className="flex items-center font-bold p-4 text-xl font-pt-sans">
+        <div className="relative flex h-full min-h-0 w-full flex-col md:flex-row">
+            {/*
+              Mobile: the sidebar is a bottom sheet over the map, collapsed to
+              a peek by default and expandable. Desktop (md+): the original
+              fixed 384px column. One DOM tree, no duplicated markup.
+            */}
+            {/*
+              Tailwind scans source text for complete class strings, so these
+              must stay on one line -- a multi-line template literal splits
+              them across newlines and they are never generated.
+            */}
+            <aside
+                className={`order-2 flex w-full shrink-0 flex-col rounded-t-2xl bg-jakarta text-white transition-[height] duration-300 ease-out md:order-1 md:h-full md:w-96 md:rounded-none md:transition-none ${
+                    sheetOpen ? "h-[70%]" : "h-[42%]"
+                }`}
+            >
+                {/* Drag affordance + expand toggle: mobile only. */}
+                <button
+                    type="button"
+                    onClick={() => setSheetOpen((v) => !v)}
+                    aria-expanded={sheetOpen}
+                    aria-label={
+                        sheetOpen ? "Perkecil daftar rute" : "Perbesar daftar rute"
+                    }
+                    className="flex w-full shrink-0 items-center justify-center py-2 md:hidden"
+                >
+                    <span className="h-1 w-10 rounded-full bg-white/30" />
+                </button>
+
+                <div className="hidden items-center p-4 text-xl font-bold font-pt-sans md:flex">
                     <Link href={"/"}>Transum App - {selectedMode}</Link>
                 </div>
-                <Separator />
-                <div className="flex flex-col w-full p-4">
+                <Separator className="hidden md:block" />
+                <div className="hidden w-full flex-col p-4 md:flex">
                     <Select
                         onValueChange={(val) => setSelectedMode(val)}
                         defaultValue="Transjakarta"
@@ -142,9 +172,9 @@ export default function Index() {
                     </Select>
                 </div>
 
-                <Separator />
-                <div className="flex flex-col w-full grow overflow-hidden">
-                    <div className="p-4">
+                <Separator className="hidden md:block" />
+                <div className="flex w-full grow flex-col overflow-hidden">
+                    <div className="px-4 pb-3 md:p-4">
                         {/*
                           The sidebar is always dark navy, so the input cannot
                           inherit the themed background/foreground -- in dark
@@ -186,16 +216,23 @@ export default function Index() {
                                         key={r.route_id}
                                         type="button"
                                         aria-pressed={isSelected}
-                                        className={`flex w-[calc(100%+2rem)] text-left items-center gap-2 p-2 text-white cursor-pointer -ml-4 -mr-4 pl-4 pr-4 ${
+                                        className={`-ml-4 -mr-4 flex w-[calc(100%+2rem)] cursor-pointer items-center gap-2 p-2 pl-4 pr-4 text-left text-white transition-colors ${
                                             isSelected
-                                                ? "bg-jakarta-selected brightness-100 hover:brightness-110"
-                                                : "hover:bg-white hover:bg-opacity-10"
+                                                ? "bg-jakarta-selected hover:brightness-110"
+                                                : // `bg-opacity-*` was removed in Tailwind v4, so the
+                                                  // old `hover:bg-white hover:bg-opacity-10` rendered
+                                                  // as solid white -- white text on white. Use the
+                                                  // slash-opacity syntax instead.
+                                                  "hover:bg-white/10"
                                         }`}
-                                        onClick={() =>
+                                        onClick={() => {
                                             setSelectedRouteId(
                                                 isSelected ? null : r.route_id
-                                            )
-                                        }
+                                            );
+                                            // Give the map room once a route is
+                                            // picked; no-op on desktop.
+                                            if (!isSelected) setSheetOpen(false);
+                                        }}
                                     >
                                         <div
                                             className="flex shrink-0 w-10 h-10 text-sm font-bold font-pt-sans-narrow rounded-full items-center justify-center"
@@ -228,9 +265,9 @@ export default function Index() {
                         </div>
                     )}
                 </div>
-            </div>
+            </aside>
 
-            <div className="w-full">
+            <div className="order-1 min-h-0 w-full flex-1 md:order-2 md:h-full md:flex-none">
                 <MainMapComponent
                     geometry={detail?.geometry ?? null}
                     lineColor={detail?.route_color}

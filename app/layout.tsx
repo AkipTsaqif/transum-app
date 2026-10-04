@@ -62,11 +62,13 @@ export default function RootLayout({
                     enableSystem
                     disableTransitionOnChange
                 >
-                    <main className="h-screen flex flex-col items-center">
-                        <div className="absolute flex items-center justify-center top-2 right-2 z-9999 bg-jakarta/70 rounded-full">
+                    {/* h-dvh, not h-screen: mobile browser chrome makes 100vh
+                        taller than the visible viewport. */}
+                    <main className="flex h-dvh flex-col overflow-hidden">
+                        <div className="absolute top-2 right-2 z-9999 flex items-center justify-center rounded-full bg-jakarta/70">
                             <ThemeSwitcher />
                         </div>
-                        <div className="flex-1 w-full flex flex-col items-center">
+                        <div className="flex min-h-0 w-full flex-1 flex-col">
                             {children}
                             <div className="flex gap-2 absolute top-0 right-0 z-9998">
                                 {route}

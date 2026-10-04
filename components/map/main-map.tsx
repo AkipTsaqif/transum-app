@@ -247,7 +247,9 @@ const MainMapComponent = ({
                 zoom: 10,
             }}
             onMove={handleMove}
-            style={{ width: "100%", height: "100vh" }}
+            // Fills whatever the parent allots. A hard 100vh would overflow the
+            // mobile layout, where the map shares the screen with a bottom sheet.
+            style={{ width: "100%", height: "100%" }}
             mapStyle={MAP_STYLE}
         >
             <NavigationControl position="bottom-right" />
