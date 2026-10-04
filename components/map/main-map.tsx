@@ -258,7 +258,10 @@ const StopLabels = React.memo(function StopLabels({
                     // every label silently disappears. Their styles ship
                     // Noto Sans.
                     "text-font": textFont,
-                    "text-size": 11,
+                    // Slightly tightened to echo PT Sans Narrow, which the
+                    // glyph server cannot serve (see `textFont` above).
+                    "text-size": 11.5,
+                    "text-letter-spacing": -0.02,
                     "text-max-width": 8,
                     // Try each position in turn until one is free.
                     "text-variable-anchor": [
@@ -339,25 +342,69 @@ const MainMapComponent = ({
     /**
      * Font stack for our own symbol layers.
      *
-     * MapLibre defaults to "Open Sans Regular". OpenFreeMap only hosts Noto
-     * Sans, so that default 404s and every label silently vanishes. Rather
-     * than hardcode one basemap's fonts, borrow whatever the loaded style
-     * already uses -- that is guaranteed to resolve against its glyph server.
+     * A symbol layer can only use fonts the *tile server* has pre-rendered as
+     * SDF glyphs -- a webfont loaded by the page (PT Sans, via next/font) is
+     * invisible to it. OpenFreeMap serves Noto Sans only, so labels must use
+     * that; PT Sans is still used everywhere in the DOM.
+     *
+     * MapLibre's own default is "Open Sans Regular", which OpenFreeMap does
+     * not host: the glyph request 404s and every label silently disappears.
+     * So the stack is read from the loaded style rather than hardcoded, which
+     * also keeps it correct if NEXT_PUBLIC_MAPTILER_KEY swaps the basemap.
      */
-    const [textFont, setTextFont] = useState<string[]>(["Noto Sans Regular"]);
+    const [textFont, setTextFont] = useState<string[]>(["Noto Sans Bold"]);
 
     const adoptStyleFont = useCallback(() => {
         const map = mapRef.current?.getMap?.();
         const layers = map?.getStyle?.()?.layers ?? [];
+
+        const seen = new Set<string>();
         for (const l of layers) {
             const f = (l as { layout?: { "text-font"?: unknown } }).layout?.[
                 "text-font"
             ];
             if (Array.isArray(f) && typeof f[0] === "string") {
-                setTextFont(f as string[]);
-                return;
+                for (const name of f as string[]) seen.add(name);
             }
         }
+        if (!seen.size) return;
+
+        const names = [...seen];
+        // Never italic: the first stack in the style belongs to a waterway
+        // label, which is why stop names first rendered thin and slanted.
+        const upright = names.filter((n) => !/italic|oblique/i.test(n));
+        if (!upright.length) return;
+
+        // Resolved styles collapse to a single weight, so the bold sibling is
+        // derived by name. Request exactly ONE font: a glyph server keys on
+        // the whole stack, so ["Noto Sans Bold","Noto Sans Regular"] asks for
+        // a combined stack that does not exist and 404s on every range.
+        const base = upright[0];
+        const bold =
+            upright.find((n) => /bold|semibold/i.test(n)) ??
+            (/\bRegular\b/i.test(base)
+                ? base.replace(/\bRegular\b/i, "Bold")
+                : null);
+
+        if (!bold) {
+            setTextFont([base]);
+            return;
+        }
+
+        // Only switch once the derived name is known to resolve.
+        const glyphs = (map?.getStyle?.() as { glyphs?: string })?.glyphs;
+        if (!glyphs) {
+            setTextFont([base]);
+            return;
+        }
+
+        const probe = glyphs
+            .replace("{fontstack}", encodeURIComponent(bold))
+            .replace("{range}", "0-255");
+
+        fetch(probe, { method: "HEAD" })
+            .then((r) => setTextFont(r.ok ? [bold] : [base]))
+            .catch(() => setTextFont([base]));
     }, []);
 
     // Clustering is O(n^2); keep it out of the render path on every pan.
