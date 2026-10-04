@@ -25,7 +25,7 @@ import type {
 } from "@/utils/types/gtfs";
 import type { FeatureCollection } from "geojson";
 
-import { ArrowLeft, MapPin, X } from "lucide-react";
+import { ArrowLeft, ChevronRight, MapPin, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -54,6 +54,9 @@ export default function Index() {
     // Stop-name matches for the current query. Routes are filtered locally
     // from the index already on the client; stops live server-side.
     const [stopHits, setStopHits] = useState<StationSearchHit[]>([]);
+
+    // Which pattern of the selected route to draw. null = the trunk(s).
+    const [variantTripId, setVariantTripId] = useState<string | null>(null);
 
     const [station, setStation] = useState<StationDetail | null>(null);
     const [stationLoading, setStationLoading] = useState(false);
@@ -125,6 +128,8 @@ export default function Index() {
 
         const ctrl = new AbortController();
         abortRef.current = ctrl;
+        // A new route starts on its trunk.
+        setVariantTripId(null);
 
         (async () => {
             setDetailLoading(true);
@@ -265,32 +270,93 @@ export default function Index() {
         abortRef.current?.abort();
         clearStation();
         setSelectedRouteId(null);
+        setVariantTripId(null);
         setDetail(null);
         setDetailError(null);
         setDetailLoading(false);
     }, [clearStation]);
 
     // What the map draws: the station's routes when a stop is open, otherwise
-    // the single selected route.
+    // the selected route -- either its trunk patterns or one chosen variant.
     const layers: DrawnLayer[] = useMemo(() => {
         if (station) {
-            return stationRoutes.map((r) => ({
-                id: r.route_id,
-                color: r.route_color,
-                geometry: r.geometry,
-            }));
+            // Station view draws each route's trunk patterns only -- drawing
+            // every diversion of every calling route would be unreadable.
+            return stationRoutes.map((r) => {
+                const trunkShapes = (r.variants ?? [])
+                    .filter((v) => v.kind === "utama")
+                    .map((v) => v.shape_id);
+                const use = trunkShapes.length
+                    ? trunkShapes
+                    : Object.keys(r.geometryByShape ?? {});
+
+                return {
+                    id: r.route_id,
+                    color: r.route_color,
+                    geometry: {
+                        type: "FeatureCollection" as const,
+                        features: use
+                            .map((s) => r.geometryByShape?.[s])
+                            .filter((c): c is [number, number][] =>
+                                Boolean(c?.length)
+                            )
+                            .map((coordinates) => ({
+                                type: "Feature" as const,
+                                properties: { shape_id: "" },
+                                geometry: {
+                                    type: "LineString" as const,
+                                    coordinates,
+                                },
+                            })),
+                    },
+                };
+            });
         }
-        if (detail) {
+        if (!detail) return [];
+
+        const lineFor = (shapeId: string) => detail.geometryByShape?.[shapeId];
+
+        const chosen = variantTripId
+            ? detail.variants.filter((v) => v.trip_id === variantTripId)
+            : detail.variants.filter((v) => v.kind === "utama");
+
+        const features = chosen
+            .map((v) => lineFor(v.shape_id))
+            .filter((c): c is [number, number][] => Boolean(c?.length))
+            .map((coordinates) => ({
+                type: "Feature" as const,
+                properties: { shape_id: "" },
+                geometry: { type: "LineString" as const, coordinates },
+            }));
+
+        // A route with no usable variant geometry: draw every shape it has
+        // rather than leaving the map blank.
+        if (!features.length) {
+            const all = Object.values(detail.geometryByShape ?? {})
+                .filter((c) => c?.length)
+                .map((coordinates) => ({
+                    type: "Feature" as const,
+                    properties: { shape_id: "" },
+                    geometry: { type: "LineString" as const, coordinates },
+                }));
+            if (!all.length) return [];
             return [
                 {
                     id: detail.route_id,
                     color: detail.route_color,
-                    geometry: detail.geometry,
+                    geometry: { type: "FeatureCollection", features: all },
                 },
             ];
         }
-        return [];
-    }, [station, stationRoutes, detail]);
+
+        return [
+            {
+                id: `${detail.route_id}:${variantTripId ?? "utama"}`,
+                color: detail.route_color,
+                geometry: { type: "FeatureCollection", features },
+            },
+        ];
+    }, [station, stationRoutes, detail, variantTripId]);
 
     // Stops shown as pins: every stop of every drawn route, de-duplicated.
     const visibleStops: RouteStop[] = useMemo(() => {
@@ -306,8 +372,20 @@ export default function Index() {
             }
             return out;
         }
-        return detail?.stops ?? [];
-    }, [station, stationRoutes, detail]);
+        if (!detail) return [];
+
+        // Limit pins to the pattern actually drawn, so a diversion does not
+        // show stops it never calls at.
+        const v = variantTripId
+            ? detail.variants.find((x) => x.trip_id === variantTripId)
+            : null;
+        if (v) {
+            const allow = new Set(v.stopIds);
+            const only = detail.stops.filter((s) => allow.has(s.stop_id));
+            if (only.length) return only;
+        }
+        return detail.stops;
+    }, [station, stationRoutes, detail, variantTripId]);
 
     // Stop-name search. Debounced so typing does not fire a request per key.
     useEffect(() => {
@@ -444,6 +522,14 @@ export default function Index() {
                     </div>
 
                     <div className="flex-1 overflow-y-auto pl-4 pr-4 pb-4">
+                        {!station && detail && (
+                            <VariantPanel
+                                detail={detail}
+                                selected={variantTripId}
+                                onSelect={setVariantTripId}
+                            />
+                        )}
+
                         {station && (
                             <StopPanel
                                 station={station}
@@ -605,6 +691,160 @@ export default function Index() {
                     onStopClick={handleStopClick}
                 />
             </div>
+        </div>
+    );
+}
+
+/**
+ * Pattern picker for the selected route.
+ *
+ * Transjakarta files every pattern under one route_id, so "route 1" is really
+ * 18 trips. Only the trunk is treated as the normal service; every diversion
+ * is opt-in, because GTFS Static cannot say which one is running today.
+ */
+function VariantPanel({
+    detail,
+    selected,
+    onSelect,
+}: {
+    detail: RouteDetail;
+    selected: string | null;
+    onSelect: (tripId: string | null) => void;
+}) {
+    const [showOther, setShowOther] = useState(false);
+
+    const variants = detail.variants ?? [];
+    if (variants.length < 2) return null;
+
+    const diversions = variants.filter((v) => v.kind === "alihan");
+    const others = variants.filter(
+        (v) => v.kind === "pendek" || v.kind === "putaran"
+    );
+
+    const dirLabel = (d: string) => (d === "0" ? "\u2192" : "\u2190");
+
+    const Row = ({
+        id,
+        active,
+        title,
+        sub,
+        onClick,
+    }: {
+        id: string;
+        active: boolean;
+        title: string;
+        sub: string;
+        onClick: () => void;
+    }) => (
+        <button
+            key={id}
+            type="button"
+            onClick={onClick}
+            aria-pressed={active}
+            className={`flex w-full cursor-pointer items-start gap-2 px-4 py-2 text-left transition-colors ${
+                active ? "bg-white/15" : "hover:bg-white/10"
+            }`}
+        >
+            <span
+                className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+                    active ? "bg-white" : "bg-white/30"
+                }`}
+            />
+            <span className="min-w-0 flex-1">
+                <span className="block text-sm font-pt-sans">{title}</span>
+                <span className="block text-xs text-white/50">{sub}</span>
+            </span>
+        </button>
+    );
+
+    return (
+        <div className="-ml-4 -mr-4 border-b border-white/10 pb-2">
+            <div className="px-4 pt-1 pb-1 text-xs font-bold tracking-wide text-white/40 uppercase">
+                Pola perjalanan
+            </div>
+
+            {variants
+                .filter((v) => v.kind === "utama")
+                .map((v) => (
+                    <Row
+                        key={v.trip_id}
+                        id={v.trip_id}
+                        active={selected === null}
+                        title={`Utama ${dirLabel(v.direction_id)} ${v.headsign}`}
+                        sub={`${v.stopCount} halte${
+                            v.headwaySecs
+                                ? ` \u00b7 tiap ${Math.round(v.headwaySecs / 60)} mnt`
+                                : ""
+                        }`}
+                        onClick={() => onSelect(null)}
+                    />
+                ))}
+
+            {diversions.length > 0 && (
+                <>
+                    <div className="px-4 pt-2 pb-1 text-xs font-bold tracking-wide text-white/40 uppercase">
+                        Jalur alternatif
+                    </div>
+                    {diversions.map((v) => (
+                        <Row
+                            key={v.trip_id}
+                            id={v.trip_id}
+                            active={selected === v.trip_id}
+                            title={`${dirLabel(v.direction_id)} ${
+                                v.via ? `via ${v.via}` : v.headsign
+                            }`}
+                            sub={`${v.stopCount} halte${
+                                v.extraStops.length
+                                    ? ` \u00b7 +${v.extraStops.length} halte lain`
+                                    : ""
+                            }`}
+                            onClick={() =>
+                                onSelect(selected === v.trip_id ? null : v.trip_id)
+                            }
+                        />
+                    ))}
+                </>
+            )}
+
+            {others.length > 0 && (
+                <>
+                    <button
+                        type="button"
+                        onClick={() => setShowOther((s) => !s)}
+                        aria-expanded={showOther}
+                        className="mt-1 flex w-full items-center gap-1 px-4 py-1.5 text-xs text-white/50 hover:text-white/80"
+                    >
+                        <ChevronRight
+                            size={13}
+                            className={`transition-transform ${showOther ? "rotate-90" : ""}`}
+                        />
+                        Layanan pendek &amp; putaran ({others.length})
+                    </button>
+                    {showOther &&
+                        others.map((v) => (
+                            <Row
+                                key={v.trip_id}
+                                id={v.trip_id}
+                                active={selected === v.trip_id}
+                                title={`${dirLabel(v.direction_id)} ${v.headsign}`}
+                                sub={`${
+                                    v.kind === "putaran" ? "Putaran" : "Pendek"
+                                } \u00b7 ${v.stopCount} halte`}
+                                onClick={() =>
+                                    onSelect(
+                                        selected === v.trip_id ? null : v.trip_id
+                                    )
+                                }
+                            />
+                        ))}
+                </>
+            )}
+
+            <p className="px-4 pt-2 text-[11px] leading-snug text-white/35">
+                Jalur alternatif ditampilkan hanya bila dipilih. Data GTFS tidak
+                mencatat pengalihan yang sedang berlaku, jadi kondisi di
+                lapangan bisa berbeda.
+            </p>
         </div>
     );
 }

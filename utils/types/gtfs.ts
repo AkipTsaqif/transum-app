@@ -41,14 +41,57 @@ export interface ShapeCollection {
     features: ShapeFeature[];
 }
 
-/** One route's full payload: ~27 KB average, fetched on click. */
+/**
+ * How a trip relates to its route's main pattern.
+ *
+ * Transjakarta files every pattern under one route_id, so a single route can
+ * be 18 trips. These are our classification, not GTFS fields.
+ */
+export type VariantKind =
+    /** Most frequent pattern in its direction -- the everyday service. */
+    | "utama"
+    /** Visits stops the trunk does not: a genuine alternative alignment. */
+    | "alihan"
+    /** Same corridor, finishes early (a strict subsequence of the trunk). */
+    | "pendek"
+    /** Returns to the stop it started from. */
+    | "putaran";
+
+export interface FrequencyWindow {
+    start: string;
+    end: string;
+    headwaySecs: number;
+}
+
+export interface RouteVariant {
+    trip_id: string;
+    shape_id: string;
+    direction_id: string;
+    kind: VariantKind;
+    headsign: string;
+    /** "Gerbang Pemuda" from a via-headsign, else its first distinct stop. */
+    via: string | null;
+    service_id: string;
+    headwaySecs: number | null;
+    windows: FrequencyWindow[];
+    stopCount: number;
+    /** Stops this pattern adds relative to the trunk. */
+    extraStops: string[];
+    /** Trunk stops this pattern misses. */
+    skippedStops: string[];
+    stopIds: string[];
+}
+
+/** One route's full payload: ~24 KB gzipped, fetched on click. */
 export interface RouteDetail {
     route_id: string;
     route_short_name: string;
     route_long_name: string;
     route_color: string;
-    geometry: ShapeCollection;
     stops: RouteStop[];
+    variants: RouteVariant[];
+    /** shape_id -> [lon, lat][]. The client assembles the lines it needs. */
+    geometryByShape: Record<string, [number, number][]>;
 }
 
 /**

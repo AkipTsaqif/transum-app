@@ -64,9 +64,18 @@ interface RawRoute {
 interface RawTrip {
     route_id: string;
     trip_id: string;
+    service_id: string;
     shape_id: string;
     trip_headsign: string;
+    trip_short_name: string;
     direction_id: string;
+}
+
+interface RawFrequency {
+    trip_id: string;
+    start_time: string;
+    end_time: string;
+    headway_secs: string;
 }
 
 interface RawShapePoint {
@@ -207,6 +216,33 @@ const stripOppositePrefix = (name: string) =>
 const stationId = (name: string, lat: number, lon: number) =>
     `${name}@${lat.toFixed(5)},${lon.toFixed(5)}`;
 
+/** "HH:MM:SS" -> seconds since midnight. GTFS allows hours past 24. */
+const toSeconds = (hhmmss: string) => {
+    const [h, m, s] = hhmmss.split(":").map(Number);
+    return h * 3600 + m * 60 + (s || 0);
+};
+
+/**
+ * Is `a` a subsequence of `b`? Used to tell a short-turn (same corridor,
+ * finishes early) from a genuine detour (visits stops the trunk never does).
+ */
+function isSubsequence(a: string[], b: string[]) {
+    let i = 0;
+    for (const x of b) {
+        if (x === a[i]) i++;
+        if (i === a.length) return true;
+    }
+    return i === a.length;
+}
+
+/** Pulls "Gerbang Pemuda" out of "Kota via Gerbang Pemuda". */
+const viaLabel = (t: RawTrip) => {
+    const m =
+        /\bvia\s+(.+)$/i.exec(t.trip_headsign ?? "") ??
+        /\bvia\s+(.+)$/i.exec(t.trip_short_name ?? "");
+    return m ? m[1].trim() : null;
+};
+
 // ----------------------------------------------------------------------- main
 
 async function main() {
@@ -282,6 +318,9 @@ async function main() {
     const shapes = read<RawShapePoint>("shapes.txt");
     const stops = read<RawStop>("stops.txt");
     const stopTimes = read<RawStopTime>("stop_times.txt");
+    // Optional in GTFS, and the sole source of "how often does this pattern
+    // actually run" -- which is how the trunk is told from a diversion.
+    const frequencies = read<RawFrequency>("frequencies.txt", false);
 
     console.log(
         `  routes=${routes.length} trips=${trips.length} ` +
@@ -310,6 +349,9 @@ async function main() {
 
     const tripsByRoute = new Map<string, RawTrip[]>();
     for (const t of trips) pushInto(tripsByRoute, t.route_id, t);
+
+    const freqByTrip = new Map<string, RawFrequency[]>();
+    for (const f of frequencies) pushInto(freqByTrip, f.trip_id, f);
 
     // --- sidebar index: everything the list needs, nothing it doesn't.
     const index = routes
@@ -349,23 +391,7 @@ async function main() {
             ...new Set(myTrips.map((t) => t.shape_id).filter(Boolean)),
         ];
 
-        const features = shapeIds
-            .filter((id) => shapesById.has(id))
-            .map((id) => ({
-                type: "Feature" as const,
-                properties: { shape_id: id },
-                geometry: {
-                    type: "LineString" as const,
-                    coordinates: shapesById
-                        .get(id)!
-                        .map((p) => [
-                            round(Number(p.shape_pt_lon)),
-                            round(Number(p.shape_pt_lat)),
-                        ]),
-                },
-            }));
-
-        if (features.length === 0) withoutGeometry++;
+        if (!shapeIds.some((id) => shapesById.has(id))) withoutGeometry++;
 
         // Unique stops served by this route, in call order.
         //
@@ -404,6 +430,108 @@ async function main() {
             }
         }
 
+        // --- variants -------------------------------------------------
+        //
+        // Transjakarta files every pattern of a route under one route_id, so
+        // "route 1" is really 18 trips: the trunk, peak-only diversions,
+        // short-turns and loops. Drawing them together produces a tangle, so
+        // classify each trip and let the UI show one at a time.
+        //
+        // Per direction: the trunk is the most frequent trip, ties broken by
+        // stop count. Everything else is measured against it.
+        const describe = (t: RawTrip) => {
+            const seq = stopTimesByTrip.get(t.trip_id) ?? [];
+            const names = seq
+                .map((st) => stopById.get(st.stop_id))
+                .filter(Boolean)
+                .map((s) => stripOppositePrefix(s!.stop_name));
+            const windows = freqByTrip.get(t.trip_id) ?? [];
+            return {
+                trip: t,
+                names,
+                set: new Set(names),
+                stopIds: seq.map((st) => st.stop_id),
+                // Lowest headway across its windows; Infinity if unscheduled.
+                headway: windows.length
+                    ? Math.min(...windows.map((w) => Number(w.headway_secs)))
+                    : Infinity,
+                windows: windows.map((w) => ({
+                    start: w.start_time,
+                    end: w.end_time,
+                    headwaySecs: Number(w.headway_secs),
+                })),
+                // A real loop returns to the same stop_id. Comparing names
+                // would wrongly flag out-and-back trips that finish at the
+                // "Sbr." stop across the road -- 32 of them in this feed.
+                loop:
+                    seq.length > 1 &&
+                    seq[0].stop_id === seq[seq.length - 1].stop_id,
+            };
+        };
+
+        const variants: Array<Record<string, unknown>> = [];
+
+        for (const dir of ["0", "1"]) {
+            const inDir = myTrips
+                .filter((t) => t.direction_id === dir)
+                .map(describe);
+            if (!inDir.length) continue;
+
+            const straight = inDir.filter((x) => !x.loop);
+            const pool = straight.length ? straight : inDir;
+            pool.sort(
+                (a, b) => a.headway - b.headway || b.names.length - a.names.length
+            );
+
+            const trunk = pool[0];
+            const loops = straight.length ? inDir.filter((x) => x.loop) : [];
+
+            for (const v of [...pool, ...loops]) {
+                const isTrunk = v === trunk;
+                const extra = v.names.filter((n) => !trunk.set.has(n));
+                const skipped = trunk.names.filter((n) => !v.set.has(n));
+
+                const kind = isTrunk
+                    ? "utama"
+                    : v.loop
+                      ? "putaran"
+                      : extra.length === 0 &&
+                          isSubsequence(v.names, trunk.names)
+                        ? "pendek"
+                        : "alihan";
+
+                variants.push({
+                    trip_id: v.trip.trip_id,
+                    shape_id: v.trip.shape_id,
+                    direction_id: dir,
+                    kind,
+                    headsign: v.trip.trip_headsign,
+                    // "via Gerbang Pemuda" when stated, else the first stop
+                    // this pattern reaches that the trunk does not.
+                    via: viaLabel(v.trip) ?? (extra.length ? extra[0] : null),
+                    service_id: v.trip.service_id,
+                    headwaySecs:
+                        v.headway === Infinity ? null : v.headway,
+                    windows: v.windows,
+                    stopCount: v.names.length,
+                    extraStops: isTrunk ? [] : extra,
+                    skippedStops: isTrunk ? [] : skipped,
+                    stopIds: v.stopIds,
+                });
+            }
+        }
+
+        // Geometry per shape so the UI can draw a single variant.
+        const geometryByShape: Record<string, [number, number][]> = {};
+        for (const id of shapeIds) {
+            const pts = shapesById.get(id);
+            if (!pts) continue;
+            geometryByShape[id] = pts.map((p) => [
+                round(Number(p.shape_pt_lon)),
+                round(Number(p.shape_pt_lat)),
+            ]);
+        }
+
         const payload = JSON.stringify({
             route_id: r.route_id,
             route_short_name: r.route_short_name,
@@ -411,8 +539,12 @@ async function main() {
             route_color: /^[0-9a-f]{6}$/i.test(r.route_color ?? "")
                 ? r.route_color
                 : "6B7280",
-            geometry: { type: "FeatureCollection", features },
             stops: routeStops,
+            variants,
+            // Keyed by shape so a single pattern can be drawn. The client
+            // builds a FeatureCollection from whichever shapes it needs --
+            // storing a merged copy too would double the file for nothing.
+            geometryByShape,
         });
 
         totalBytes += payload.length;
