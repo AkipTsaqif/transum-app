@@ -143,7 +143,7 @@ export default function Index() {
                 </div>
 
                 <Separator />
-                <div className="flex flex-col w-full flex-grow overflow-hidden">
+                <div className="flex flex-col w-full grow overflow-hidden">
                     <div className="p-4 text-black">
                         <Input
                             placeholder="Cari rute"

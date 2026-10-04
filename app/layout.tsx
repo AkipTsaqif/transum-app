@@ -42,12 +42,12 @@ export default function RootLayout({
                     disableTransitionOnChange
                 >
                     <main className="h-screen flex flex-col items-center">
-                        <div className="absolute flex items-center justify-center top-2 right-2 z-[9999] bg-jakarta/70 rounded-full">
+                        <div className="absolute flex items-center justify-center top-2 right-2 z-9999 bg-jakarta/70 rounded-full">
                             <ThemeSwitcher />
                         </div>
                         <div className="flex-1 w-full flex flex-col items-center">
                             {children}
-                            <div className="flex gap-2 absolute top-0 right-0 z-[9998]">
+                            <div className="flex gap-2 absolute top-0 right-0 z-9998">
                                 {route}
                                 {stop}
                             </div>

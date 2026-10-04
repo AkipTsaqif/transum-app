@@ -12,7 +12,13 @@ export const signUpAction = async (formData: FormData) => {
   const origin = (await headers()).get("origin");
 
   if (!email || !password) {
-    return { error: "Email and password are required" };
+    // Every other branch redirects; returning a bare object here made the
+    // action's type incompatible with a form `action` prop under React 19.
+    return encodedRedirect(
+      "error",
+      "/sign-up",
+      "Email and password are required",
+    );
   }
 
   const { error } = await supabase.auth.signUp({
