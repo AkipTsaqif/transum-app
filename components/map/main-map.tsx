@@ -5,9 +5,14 @@ import MapGL, {
     Marker,
     NavigationControl,
     Source,
+    type MapRef,
 } from "react-map-gl/maplibre";
-import { setWorkerUrl, type StyleSpecification } from "maplibre-gl";
-import React, { useMemo, useState } from "react";
+import {
+    setWorkerUrl,
+    type LngLatBoundsLike,
+    type StyleSpecification,
+} from "maplibre-gl";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
 import { BusFront } from "lucide-react";
 import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
@@ -75,6 +80,38 @@ interface Cluster {
     lon: number;
     count: number;
     name: string;
+}
+
+/**
+ * Tight bounding box around every coordinate in the route's geometry.
+ * Returns null for empty geometry so callers can skip the camera move.
+ */
+function geometryBounds(
+    geometry: ShapeCollection | null
+): LngLatBoundsLike | null {
+    if (!geometry?.features.length) return null;
+
+    let minLon = Infinity;
+    let minLat = Infinity;
+    let maxLon = -Infinity;
+    let maxLat = -Infinity;
+
+    for (const f of geometry.features) {
+        for (const [lon, lat] of f.geometry.coordinates) {
+            if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+            if (lon < minLon) minLon = lon;
+            if (lat < minLat) minLat = lat;
+            if (lon > maxLon) maxLon = lon;
+            if (lat > maxLat) maxLat = lat;
+        }
+    }
+
+    if (!Number.isFinite(minLon) || !Number.isFinite(minLat)) return null;
+
+    return [
+        [minLon, minLat],
+        [maxLon, maxLat],
+    ];
 }
 
 /**
@@ -158,23 +195,58 @@ const MainMapComponent = ({
     lineColor = "FFFFFF",
     routeStops,
 }: MainMapComponentProps) => {
-    const zoomThreshold = 12;
+    // Auto-fit frames a whole route at roughly z11-z13, so the old "> 12"
+    // marker gate hid every stop the moment fitBounds finished. Pins are cheap
+    // (tens per route, clustered) -- show them as soon as a route is framed,
+    // and keep labels for when the user is actually zoomed in.
+    const zoomThreshold = 10;
     const labelThreshold = 13;
     const nearbyThreshold = 55;
 
-    const [viewState, setViewState] = useState({
-        latitude: -6.1907,
-        longitude: 106.8228,
-        zoom: 10,
-    });
+    const mapRef = useRef<MapRef | null>(null);
 
-    // Quantised so continuous zooming doesn't invalidate the memo every frame.
-    const zoomLevel = Math.floor(viewState.zoom);
+    // Uncontrolled camera (initialViewState + no `onMove` write-back) so
+    // fitBounds can animate freely. A controlled viewState would be re-applied
+    // by React on every frame and fight the easing.
+    const [zoomLevel, setZoomLevel] = useState(10);
+
+    const handleMove = useCallback((e: { viewState: { zoom: number } }) => {
+        // Quantise: markers only care about whole zoom steps, so this re-renders
+        // ~once per zoom level instead of once per animation frame.
+        setZoomLevel((prev) => {
+            const next = Math.floor(e.viewState.zoom);
+            return next === prev ? prev : next;
+        });
+    }, []);
+
+    const bounds = useMemo(() => geometryBounds(geometry), [geometry]);
+
+    // Frame the selected route. Depends on `bounds` (not `geometry`) so
+    // re-selecting a route with identical extent does not re-animate.
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !bounds) return;
+
+        map.fitBounds(bounds, {
+            // Leaves room for the stop labels, which extend to the right of
+            // their pin, and keeps the line clear of the zoom controls.
+            padding: { top: 64, bottom: 64, left: 64, right: 96 },
+            // A single stop would otherwise zoom to maxZoom.
+            maxZoom: 15,
+            duration: 900,
+            essential: true,
+        });
+    }, [bounds]);
 
     return (
         <MapGL
-            {...viewState}
-            onMove={(e) => setViewState(e.viewState)}
+            ref={mapRef}
+            initialViewState={{
+                latitude: -6.1907,
+                longitude: 106.8228,
+                zoom: 10,
+            }}
+            onMove={handleMove}
             style={{ width: "100%", height: "100vh" }}
             mapStyle={MAP_STYLE}
         >
