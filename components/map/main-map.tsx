@@ -162,24 +162,14 @@ function clusterStops(stops: RouteStop[], nearbyThreshold: number): Cluster[] {
 }
 
 const StopMarkers = React.memo(function StopMarkers({
-    stops,
-    showLabels,
-    nearbyThreshold,
+    clusters,
     activeName,
     onStopClick,
 }: {
-    stops: RouteStop[];
-    showLabels: boolean;
-    nearbyThreshold: number;
+    clusters: Cluster[];
     activeName?: string | null;
     onStopClick?: (stop: RouteStop) => void;
 }) {
-    // Clustering is O(n^2); keep it out of the render path on every pan.
-    const clusters = useMemo(
-        () => clusterStops(stops, nearbyThreshold),
-        [stops, nearbyThreshold]
-    );
-
     return (
         <>
             {clusters.map((c) => {
@@ -214,15 +204,88 @@ const StopMarkers = React.memo(function StopMarkers({
                                 }
                             />
                         </button>
-                        {(showLabels || isActive) && (
-                            <div className="pointer-events-none absolute top-0 left-[2em] w-24 rounded-sm text-xs leading-none font-bold font-pt-sans-narrow">
-                                {c.name}
-                            </div>
-                        )}
                     </Marker>
                 );
             })}
         </>
+    );
+});
+
+/**
+ * Labels for the clustered route stops.
+ *
+ * Rendered as a MapLibre symbol layer rather than DOM nodes so the collision
+ * engine can place them: `text-allow-overlap: false` hides a label that cannot
+ * fit, and `text-variable-anchor` first tries moving it around the pin -- right,
+ * left, above, below -- before giving up. DOM labels had a fixed offset and
+ * simply overlapped each other.
+ */
+const StopLabels = React.memo(function StopLabels({
+    clusters,
+    activeName,
+    textFont,
+}: {
+    clusters: Cluster[];
+    activeName?: string | null;
+    textFont: string[];
+}) {
+    const data = useMemo<FeatureCollection>(
+        () => ({
+            type: "FeatureCollection",
+            features: clusters.map((c) => ({
+                type: "Feature",
+                properties: {
+                    name: c.name,
+                    // Keeps the selected stop's label on screen even in a
+                    // crowded corridor.
+                    priority: activeName === c.name ? 1 : 0,
+                },
+                geometry: { type: "Point", coordinates: [c.lon, c.lat] },
+            })),
+        }),
+        [clusters, activeName]
+    );
+
+    return (
+        <Source id="route-stop-labels" type="geojson" data={data}>
+            <Layer
+                id="route-stop-label"
+                type="symbol"
+                layout={{
+                    "text-field": ["get", "name"],
+                    // MapLibre defaults to "Open Sans Regular", which
+                    // OpenFreeMap does not host -- the glyph request 404s and
+                    // every label silently disappears. Their styles ship
+                    // Noto Sans.
+                    "text-font": textFont,
+                    "text-size": 11,
+                    "text-max-width": 8,
+                    // Try each position in turn until one is free.
+                    "text-variable-anchor": [
+                        "left",
+                        "right",
+                        "top",
+                        "bottom",
+                        "top-left",
+                        "top-right",
+                        "bottom-left",
+                        "bottom-right",
+                    ],
+                    // Distance from the pin, in ems, for every anchor above.
+                    "text-radial-offset": 0.9,
+                    "text-justify": "auto",
+                    "text-allow-overlap": false,
+                    "text-ignore-placement": false,
+                    // Higher priority is placed first, so it wins collisions.
+                    "symbol-sort-key": ["-", 0, ["get", "priority"]],
+                }}
+                paint={{
+                    "text-color": "#0C1B2A",
+                    "text-halo-color": "#FFFFFF",
+                    "text-halo-width": 1.5,
+                }}
+            />
+        </Source>
     );
 });
 
@@ -241,7 +304,11 @@ const MainMapComponent = ({
     // (tens per route, clustered) -- show them as soon as a route is framed,
     // and keep labels for when the user is actually zoomed in.
     const zoomThreshold = 10;
-    const labelThreshold = 13;
+    // Auto-fit frames a trunk anywhere from z11.9 to z15.8 depending on how
+    // long it is, so a high fixed gate hid labels on most routes right after
+    // the camera settled. Collision placement already drops labels that will
+    // not fit, so the gate only needs to stop the far-out view being noisy.
+    const labelThreshold = 11;
     const nearbyThreshold = 55;
     /** Below this, 6,437 pins would be an unreadable smear. */
     const allStopsZoom = 14;
@@ -268,6 +335,36 @@ const MainMapComponent = ({
             return next === prev ? prev : next;
         });
     }, []);
+
+    /**
+     * Font stack for our own symbol layers.
+     *
+     * MapLibre defaults to "Open Sans Regular". OpenFreeMap only hosts Noto
+     * Sans, so that default 404s and every label silently vanishes. Rather
+     * than hardcode one basemap's fonts, borrow whatever the loaded style
+     * already uses -- that is guaranteed to resolve against its glyph server.
+     */
+    const [textFont, setTextFont] = useState<string[]>(["Noto Sans Regular"]);
+
+    const adoptStyleFont = useCallback(() => {
+        const map = mapRef.current?.getMap?.();
+        const layers = map?.getStyle?.()?.layers ?? [];
+        for (const l of layers) {
+            const f = (l as { layout?: { "text-font"?: unknown } }).layout?.[
+                "text-font"
+            ];
+            if (Array.isArray(f) && typeof f[0] === "string") {
+                setTextFont(f as string[]);
+                return;
+            }
+        }
+    }, []);
+
+    // Clustering is O(n^2); keep it out of the render path on every pan.
+    const routeClusters = useMemo(
+        () => clusterStops(routeStops, nearbyThreshold),
+        [routeStops, nearbyThreshold]
+    );
 
     // Ask for the stop layer the first time it could actually be shown, so a
     // visitor who never zooms in never downloads it.
@@ -337,6 +434,8 @@ const MainMapComponent = ({
                 zoom: 10,
             }}
             onMove={handleMove}
+            onLoad={adoptStyleFont}
+            onStyleData={adoptStyleFont}
             // Fills whatever the parent allots. A hard 100vh would overflow the
             // mobile layout, where the map shares the screen with a bottom sheet.
             style={{ width: "100%", height: "100%" }}
@@ -439,11 +538,26 @@ const MainMapComponent = ({
                         minzoom={15}
                         layout={{
                             "text-field": ["get", "name"],
+                            "text-font": textFont,
                             "text-size": 11,
-                            "text-offset": [0, 1.1],
-                            "text-anchor": "top",
-                            "text-max-width": 9,
+                            "text-max-width": 8,
+                            // Same dodge-then-hide behaviour as the route
+                            // labels, rather than a fixed offset below the pin.
+                            "text-variable-anchor": [
+                                "left",
+                                "right",
+                                "top",
+                                "bottom",
+                                "top-left",
+                                "top-right",
+                                "bottom-left",
+                                "bottom-right",
+                            ],
+                            "text-radial-offset": 0.8,
+                            "text-justify": "auto",
                             "text-allow-overlap": false,
+                            // Busier interchanges win when labels collide.
+                            "symbol-sort-key": ["-", 0, ["get", "routes"]],
                         }}
                         paint={{
                             "text-color": "#0C1B2A",
@@ -454,14 +568,23 @@ const MainMapComponent = ({
                 </Source>
             )}
 
-            {zoomLevel > zoomThreshold && routeStops.length > 0 && (
-                <StopMarkers
-                    stops={routeStops}
-                    showLabels={zoomLevel >= labelThreshold}
-                    nearbyThreshold={nearbyThreshold}
-                    activeName={activeStop?.name ?? null}
-                    onStopClick={onStopClick}
-                />
+            {zoomLevel > zoomThreshold && routeClusters.length > 0 && (
+                <>
+                    {/* Labels first: a symbol layer sits under the DOM markers
+                        regardless, and this keeps the JSX order readable. */}
+                    {zoomLevel >= labelThreshold && (
+                        <StopLabels
+                            clusters={routeClusters}
+                            activeName={activeStop?.name ?? null}
+                            textFont={textFont}
+                        />
+                    )}
+                    <StopMarkers
+                        clusters={routeClusters}
+                        activeName={activeStop?.name ?? null}
+                        onStopClick={onStopClick}
+                    />
+                </>
             )}
         </MapGL>
     );

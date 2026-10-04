@@ -25,7 +25,7 @@ import type {
 } from "@/utils/types/gtfs";
 import type { FeatureCollection } from "geojson";
 
-import { ArrowLeft, ChevronRight, MapPin, X } from "lucide-react";
+import { ArrowLeft, ChevronRight, MapPin, Route, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -320,7 +320,14 @@ export default function Index() {
             ? detail.variants.filter((v) => v.trip_id === variantTripId)
             : detail.variants.filter((v) => v.kind === "utama");
 
-        const features = chosen
+        // Both trunk directions follow the same corridor a few metres apart.
+        // Drawing both produced a dashed look where the two lines alternately
+        // won the depth test, so when nothing specific is selected draw one
+        // direction only -- the corridor is identical either way.
+        const toDraw =
+            !variantTripId && chosen.length > 1 ? [chosen[0]] : chosen;
+
+        const features = toDraw
             .map((v) => lineFor(v.shape_id))
             .filter((c): c is [number, number][] => Boolean(c?.length))
             .map((coordinates) => ({
@@ -522,14 +529,6 @@ export default function Index() {
                     </div>
 
                     <div className="flex-1 overflow-y-auto pl-4 pr-4 pb-4">
-                        {!station && detail && (
-                            <VariantPanel
-                                detail={detail}
-                                selected={variantTripId}
-                                onSelect={setVariantTripId}
-                            />
-                        )}
-
                         {station && (
                             <StopPanel
                                 station={station}
@@ -671,7 +670,17 @@ export default function Index() {
               of the visible area -- about 29 km west at zoom 10, which put
               Tangerang in the middle of the screen instead of Jakarta.
             */}
-            <div className="order-1 min-h-0 w-full min-w-0 flex-1 md:order-2 md:h-full">
+            <div className="relative order-1 min-h-0 w-full min-w-0 flex-1 md:order-2 md:h-full">
+                {/* Floating over the map rather than in the sidebar: it is
+                    about the thing being drawn, so it belongs next to it. */}
+                {!station && detail && (
+                    <VariantPanel
+                        detail={detail}
+                        selected={variantTripId}
+                        onSelect={setVariantTripId}
+                    />
+                )}
+
                 <MainMapComponent
                     layers={layers}
                     routeStops={visibleStops}
@@ -712,6 +721,7 @@ function VariantPanel({
     onSelect: (tripId: string | null) => void;
 }) {
     const [showOther, setShowOther] = useState(false);
+    const [collapsed, setCollapsed] = useState(false);
 
     const variants = detail.variants ?? [];
     if (variants.length < 2) return null;
@@ -741,27 +751,60 @@ function VariantPanel({
             type="button"
             onClick={onClick}
             aria-pressed={active}
-            className={`flex w-full cursor-pointer items-start gap-2 px-4 py-2 text-left transition-colors ${
+            className={`flex w-full cursor-pointer items-start gap-2 px-3 py-1.5 text-left transition-colors ${
                 active ? "bg-white/15" : "hover:bg-white/10"
             }`}
         >
             <span
-                className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+                className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${
                     active ? "bg-white" : "bg-white/30"
                 }`}
             />
             <span className="min-w-0 flex-1">
-                <span className="block text-sm font-pt-sans">{title}</span>
-                <span className="block text-xs text-white/50">{sub}</span>
+                <span className="block truncate text-xs font-pt-sans">
+                    {title}
+                </span>
+                <span className="block text-[11px] text-white/50">{sub}</span>
             </span>
         </button>
     );
 
+    const activeLabel = selected
+        ? (() => {
+              const v = variants.find((x) => x.trip_id === selected);
+              return v ? (v.via ? `via ${v.via}` : v.headsign) : "Utama";
+          })()
+        : "Utama";
+
     return (
-        <div className="-ml-4 -mr-4 border-b border-white/10 pb-2">
-            <div className="px-4 pt-1 pb-1 text-xs font-bold tracking-wide text-white/40 uppercase">
-                Pola perjalanan
-            </div>
+        <div className="pointer-events-auto absolute top-3 left-3 z-20 w-60 overflow-hidden rounded-lg bg-jakarta/95 text-white shadow-xl ring-1 ring-white/10 backdrop-blur-sm">
+            <button
+                type="button"
+                onClick={() => setCollapsed((c) => !c)}
+                aria-expanded={!collapsed}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-white/5"
+            >
+                <Route size={13} className="shrink-0 opacity-60" />
+                <span className="min-w-0 flex-1">
+                    <span className="block text-[10px] font-bold tracking-wide text-white/40 uppercase">
+                        Pola perjalanan
+                    </span>
+                    {collapsed && (
+                        <span className="block truncate text-xs">
+                            {activeLabel}
+                        </span>
+                    )}
+                </span>
+                <ChevronRight
+                    size={14}
+                    className={`shrink-0 opacity-60 transition-transform ${
+                        collapsed ? "" : "rotate-90"
+                    }`}
+                />
+            </button>
+
+            {!collapsed && (
+                <div className="max-h-[45vh] overflow-y-auto pb-1">
 
             {variants
                 .filter((v) => v.kind === "utama")
@@ -782,7 +825,7 @@ function VariantPanel({
 
             {diversions.length > 0 && (
                 <>
-                    <div className="px-4 pt-2 pb-1 text-xs font-bold tracking-wide text-white/40 uppercase">
+                    <div className="px-3 pt-2 pb-1 text-[10px] font-bold tracking-wide text-white/40 uppercase">
                         Jalur alternatif
                     </div>
                     {diversions.map((v) => (
@@ -812,10 +855,10 @@ function VariantPanel({
                         type="button"
                         onClick={() => setShowOther((s) => !s)}
                         aria-expanded={showOther}
-                        className="mt-1 flex w-full items-center gap-1 px-4 py-1.5 text-xs text-white/50 hover:text-white/80"
+                        className="mt-1 flex w-full items-center gap-1 px-3 py-1.5 text-[11px] text-white/50 hover:text-white/80"
                     >
                         <ChevronRight
-                            size={13}
+                            size={12}
                             className={`transition-transform ${showOther ? "rotate-90" : ""}`}
                         />
                         Layanan pendek &amp; putaran ({others.length})
@@ -840,11 +883,12 @@ function VariantPanel({
                 </>
             )}
 
-            <p className="px-4 pt-2 text-[11px] leading-snug text-white/35">
-                Jalur alternatif ditampilkan hanya bila dipilih. Data GTFS tidak
-                mencatat pengalihan yang sedang berlaku, jadi kondisi di
-                lapangan bisa berbeda.
-            </p>
+                    <p className="px-3 pt-2 pb-1 text-[10px] leading-snug text-white/35">
+                        Hanya tampil bila dipilih. GTFS tidak mencatat
+                        pengalihan yang sedang berlaku.
+                    </p>
+                </div>
+            )}
         </div>
     );
 }
