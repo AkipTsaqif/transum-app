@@ -61,8 +61,9 @@ const config = {
                 sm: "calc(var(--radius) - 4px)",
             },
             fontFamily: {
-                "pt-sans": ["PT Sans", "sans-serif"],
-                "pt-sans-narrow": ["PT Sans Narrow", "sans-serif"],
+                "open-sans": ['"Open Sans"', "sans-serif"],
+                "pt-sans-narrow": ['"PT Sans Narrow"', "sans-serif"],
+                "pt-sans": ['"PT Sans"', "sans-serif"],
             },
             keyframes: {
                 "accordion-down": {
