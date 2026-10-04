@@ -52,6 +52,15 @@ const BUFFER = 3;
 const RADIUS = 8;
 const CUTOFF = 0.25;
 
+/**
+ * Distance from the ascender line down to the baseline, in the 24px em box
+ * MapLibre assumes. Glyph `top` is measured from that ascender line, so this
+ * is what keeps every letter of a word on one baseline.
+ *
+ * 26 matches the reference glyphs OpenFreeMap serves (see `renderGlyph`).
+ */
+const ASCENDER_PX = 26;
+
 /** Serialises one range into the glyphs.proto wire format. */
 function encodeGlyphs(fontstack, range, glyphs) {
     const pbf = new PbfWriter();
@@ -160,6 +169,9 @@ async function buildFont({ stack, url }) {
 function renderGlyph(glyph, scale, font) {
     const bbox = glyph.getBoundingBox();
 
+    // The ink box, rounded outward to whole pixels and then padded. These are
+    // positions on one shared pixel grid -- the sampling loop below relies on
+    // that, so they must not be re-centred per glyph.
     const x1 = Math.floor(bbox.x1 * scale) - BUFFER;
     const y1 = Math.floor(bbox.y1 * scale) - BUFFER;
     const x2 = Math.ceil(bbox.x2 * scale) + BUFFER;
@@ -170,17 +182,34 @@ function renderGlyph(glyph, scale, font) {
     if (w <= 0 || h <= 0 || w > 255 || h > 255) return null;
 
     // Supersample the outline into a coverage mask.
+    //
+    // `getPath(0, 0, SIZE)` already returns pixel coordinates at the target
+    // size, with Y pointing DOWN (y = -ascent above the baseline). The bounding
+    // box, by contrast, is in font units with Y pointing UP. Mixing the two --
+    // rescaling the path and then sampling it against bbox-derived rows -- is
+    // what made letters jitter vertically inside a word.
+    //
+    // So: take the path as-is (k = 1) and sample rows directly in its own
+    // down-positive space.
     const SS = 4;
     const mask = new Float64Array(w * h);
     const commands = glyph.getPath(0, 0, SIZE, { hinting: false }).commands;
 
-    // Flatten the path into polygons at the target scale.
-    const polys = flatten(commands, scale / (SIZE / font.unitsPerEm));
+    const polys = flatten(commands, 1);
 
+    // Sample on the *baseline's* integer grid, not a per-glyph one.
+    //
+    // The box edges below are already integers, but the ink inside them sits
+    // at a fractional offset that differs for every glyph. Sampling from the
+    // box edge threw that fraction away, so each letter was nudged by up to
+    // half a pixel in its own direction -- the vertical jitter visible inside
+    // a word. Sampling at absolute pixel centres keeps every glyph on one
+    // shared grid, and the sub-pixel position survives in the coverage values.
     for (let py = 0; py < h; py++) {
         for (let sy = 0; sy < SS; sy++) {
-            const y = y1 + py + (sy + 0.5) / SS;
-            const xs = scanline(polys, -y);
+            // Absolute y in path space (down-positive), at a pixel centre.
+            const y = -y2 + py + (sy + 0.5) / SS;
+            const xs = scanline(polys, y);
             if (!xs.length) continue;
             for (let i = 0; i + 1 < xs.length; i += 2) {
                 const sx = xs[i];
@@ -215,13 +244,30 @@ function renderGlyph(glyph, scale, font) {
         }
     }
 
+    // The protobuf carries the *padded* bitmap but the *unpadded* metrics:
+    //   "A signed distance field of the glyph with a border of 3 pixels."
+    // MapLibre reconstructs the image as (width + 2*border) x (height + 2*border)
+    // and throws "mismatched image size" unless that matches bitmap.length.
+    //
+    // `top` is NOT the ink height above the baseline. MapLibre places a quad at
+    //   y1 = (-metrics.top - rectBuffer) * scale + penY + SHAPING_DEFAULT_OFFSET
+    // where penY and SHAPING_DEFAULT_OFFSET (-17) are the same for every glyph
+    // on a line. So `top` must be measured from one FIXED line -- the ascender
+    // of a 24px em box -- down to this glyph's ink. Deriving it from each
+    // glyph's own ink height instead put every letter at its own elevation,
+    // which is the vertical jitter inside a word.
+    //
+    // Verified against OpenFreeMap's own Noto Sans glyphs, where
+    // (-top + height) is a constant 26 across caps, x-height and ascenders.
+    const inkTopAboveBaseline = y2 - BUFFER;
+
     return {
         bitmap,
-        width: w,
-        height: h,
-        left: x1,
-        // MapLibre measures `top` down from the baseline.
-        top: -y2,
+        width: w - 2 * BUFFER,
+        height: h - 2 * BUFFER,
+        // Offsets refer to the unpadded box, so undo the padding added above.
+        left: x1 + BUFFER,
+        top: -(ASCENDER_PX - inkTopAboveBaseline),
     };
 }
 
