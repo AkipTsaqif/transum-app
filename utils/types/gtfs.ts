@@ -1,58 +1,50 @@
-export interface Route {
+/**
+ * Types for the *baked* GTFS data in `data/gtfs/`, not the raw feed.
+ *
+ * The sync script (`scripts/sync-gtfs.ts`) has already done the CSV parsing,
+ * the route/trip/shape/stop_time joins, and the string->number coercion, so
+ * these are real numbers rather than the all-strings shape GTFS CSV gives you.
+ */
+
+/** A row in the sidebar list. No geometry -- the whole index is ~41 KB. */
+export interface RouteSummary {
     route_id: string;
-    agency_id: string;
     route_short_name: string;
     route_long_name: string;
     route_desc: string;
-    route_type: string;
+    /** Always a valid 6-digit hex (no `#`). Sync substitutes a grey fallback. */
     route_color: string;
     route_text_color: string;
 }
 
-export interface Shape {
-    shape_id: string;
-    shape_pt_lat: string;
-    shape_pt_lon: string;
-    shape_pt_sequence: string;
-    shape_dist_traveled: string;
-}
-
-export interface Trip {
-    route_id: string;
-    service_id: string;
-    trip_id: string;
-    trip_headsign: string;
-    trip_short_name: string;
-    direction_id: string;
-    block_id: string;
-    shape_id: string;
-}
-
-export interface StopTime {
-    trip_id: string;
-    arrival_time: string;
-    departure_time: string;
+export interface RouteStop {
     stop_id: string;
-    stop_sequence: string;
-    stop_headsign: string;
-    pickup_type: string;
-    drop_off_type: string;
-    shape_dist_traveled: string;
-    timepoint: string;
-}
-
-export interface Stop {
-    stop_id: string;
-    stop_code: string;
     stop_name: string;
-    stop_desc: string;
-    stop_lat: string;
-    stop_lon: string;
-    zone_id: string;
-    stop_url: string;
-    location_type: string;
-    parent_station: string;
-    stop_timezone: string;
-    wheelchair_boarding: string;
-    platform_code: string;
+    stop_lat: number;
+    stop_lon: number;
+}
+
+export interface ShapeFeature {
+    type: "Feature";
+    properties: { shape_id: string };
+    geometry: {
+        type: "LineString";
+        /** [lon, lat] pairs, sorted by shape_pt_sequence. */
+        coordinates: [number, number][];
+    };
+}
+
+export interface ShapeCollection {
+    type: "FeatureCollection";
+    features: ShapeFeature[];
+}
+
+/** One route's full payload: ~27 KB average, fetched on click. */
+export interface RouteDetail {
+    route_id: string;
+    route_short_name: string;
+    route_long_name: string;
+    route_color: string;
+    geometry: ShapeCollection;
+    stops: RouteStop[];
 }

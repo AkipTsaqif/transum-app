@@ -1,48 +1,29 @@
 import { NextResponse } from "next/server";
-import { Route } from "@/utils/types/gtfs";
-import AdmZip from "adm-zip";
-import fs from "fs";
-import path from "path";
-import { parse } from "csv-parse";
+import { getRouteIndex } from "@/lib/gtfs";
+
+/**
+ * GET /api/gtfs/routes
+ *
+ * The sidebar index: ~41 KB for all 240 routes, no geometry.
+ * Static between GTFS syncs, so it is cached indefinitely and revalidated
+ * daily -- a rebuild (which re-runs the sync) is what actually changes it.
+ */
+export const revalidate = 86400;
 
 export async function GET() {
-	const zipPath = path.join(process.cwd(), "public", "gtfs-tj.zip");
-
-	if (!fs.existsSync(zipPath)) {
-		return NextResponse.json(
-			{ error: "GTFS ZIP file not found" },
-			{ status: 404 }
-		);
-	}
-
-	const zip = new AdmZip(zipPath);
-	const routesFile = zip.getEntry("routes.txt");
-
-	if (!routesFile) {
-		return NextResponse.json(
-			{ error: "stops.txt not found in GTFS ZIP" },
-			{ status: 404 }
-		);
-	}
-
-	const routesContent = routesFile.getData().toString("utf-8");
-
-	return new Promise((resolve) => {
-		parse(
-			routesContent,
-			{ columns: true, trim: true },
-			(err, records: Route[]) => {
-				if (err) {
-					resolve(
-						NextResponse.json(
-							{ error: "Error parsing route data" },
-							{ status: 500 }
-						)
-					);
-				} else {
-					resolve(NextResponse.json(records));
-				}
-			}
-		);
-	});
+    try {
+        const routes = await getRouteIndex();
+        return NextResponse.json(routes, {
+            headers: {
+                "Cache-Control":
+                    "public, max-age=3600, stale-while-revalidate=86400",
+            },
+        });
+    } catch (err) {
+        console.error("Failed to read GTFS route index:", err);
+        return NextResponse.json(
+            { error: "Route index unavailable. Run `npm run sync:gtfs`." },
+            { status: 503 }
+        );
+    }
 }

@@ -1,0 +1,41 @@
+name: Sync Transjakarta GTFS
+
+# The upstream feed changes roughly monthly. The sync script sends the stored
+# ETag, so an unchanged feed costs a 304 and opens no PR.
+on:
+  schedule:
+    - cron: "0 3 1 * *" # 03:00 UTC on the 1st of each month
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Sync GTFS feed
+        run: npm run sync:gtfs
+
+      - name: Open PR if the feed changed
+        uses: peter-evans/create-pull-request@v6
+        with:
+          title: "chore: sync Transjakarta GTFS feed"
+          commit-message: "chore: sync Transjakarta GTFS feed"
+          branch: chore/gtfs-sync
+          delete-branch: true
+          add-paths: data/gtfs
+          body: |
+            Automated sync from the official Transjakarta GTFS feed.
+
+            Review the route diff before merging — a route disappearing here
+            means it disappears from the app.

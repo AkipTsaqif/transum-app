@@ -24,14 +24,23 @@ const defaultUrl = process.env.VERCEL_URL
 
 export const metadata = {
     metadataBase: new URL(defaultUrl),
-    title: "Next.js and Supabase Starter Kit",
-    description: "The fastest way to build apps with Next.js and Supabase",
+    title: "Transum App — Peta Rute Transjakarta",
+    description:
+        "Jelajahi rute dan halte Transjakarta di peta. Data GTFS resmi dari PT Transportasi Jakarta.",
 };
 
+/**
+ * `route` and `stop` are parallel-route slots (app/@route, app/@stop).
+ * Next.js passes slots to the layout, not to the page.
+ */
 export default function RootLayout({
     children,
+    route,
+    stop,
 }: {
     children: React.ReactNode;
+    route: React.ReactNode;
+    stop: React.ReactNode;
 }) {
     return (
         <html
@@ -59,6 +68,10 @@ export default function RootLayout({
 								</div>
 							</nav> */}
                             {children}
+                            <div className="flex gap-2 absolute top-0 right-0 z-[9998]">
+                                {route}
+                                {stop}
+                            </div>
 
                             {/* <footer className="w-full flex items-center justify-center border-t mx-auto text-center text-xs gap-8 py-16">
 								<p>

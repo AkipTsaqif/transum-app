@@ -1,137 +1,162 @@
 "use client";
 
-import Map, {
+import MapGL, {
     Layer,
     Marker,
     NavigationControl,
     Source,
 } from "react-map-gl/maplibre";
-import { useMemo, useState } from "react";
-import { Shape, Stop } from "@/utils/types/gtfs";
+import React, { useMemo, useState } from "react";
+import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
 import { BusFront } from "lucide-react";
-import { haversine } from "@/utils/helper-fn";
+import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
+
+const EMPTY_GEOJSON: ShapeCollection = {
+    type: "FeatureCollection",
+    features: [],
+};
+
+const MAP_STYLE = process.env.NEXT_PUBLIC_MAPTILER_KEY
+    ? `https://api.maptiler.com/maps/streets/style.json?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}`
+    : // Keyless fallback so the map still renders on a fresh clone.
+      "https://demotiles.maplibre.org/style.json";
 
 interface MainMapComponentProps {
-    shapes: Shape[];
+    geometry: ShapeCollection | null;
     lineColor: string | undefined;
-    routeStops: Stop[];
+    routeStops: RouteStop[];
 }
 
+interface Cluster {
+    lat: number;
+    lon: number;
+    count: number;
+    name: string;
+}
+
+/**
+ * Merges stops that share a base name and sit within `nearbyThreshold` metres,
+ * so a stop and its "Sbr." (across-the-road) twin render as one pin.
+ *
+ * Clusters are keyed by index rather than by a stringified coordinate, so the
+ * running centroid is what gets rendered -- and a comma in a stop name can
+ * never corrupt the key.
+ */
+function clusterStops(stops: RouteStop[], nearbyThreshold: number): Cluster[] {
+    const clusters: Cluster[] = [];
+
+    for (const stop of stops) {
+        const name = removeOppStopPrefix(stop.stop_name);
+        const lat = stop.stop_lat;
+        const lon = stop.stop_lon;
+
+        let merged = false;
+        for (const c of clusters) {
+            if (c.name !== name) continue;
+            if (haversine(lat, lon, c.lat, c.lon) >= nearbyThreshold) continue;
+
+            c.lat = (c.lat * c.count + lat) / (c.count + 1);
+            c.lon = (c.lon * c.count + lon) / (c.count + 1);
+            c.count += 1;
+            merged = true;
+            break;
+        }
+
+        if (!merged) clusters.push({ lat, lon, count: 1, name });
+    }
+
+    return clusters;
+}
+
+const StopMarkers = React.memo(function StopMarkers({
+    stops,
+    showLabels,
+    nearbyThreshold,
+}: {
+    stops: RouteStop[];
+    showLabels: boolean;
+    nearbyThreshold: number;
+}) {
+    // Clustering is O(n^2); keep it out of the render path on every pan.
+    const clusters = useMemo(
+        () => clusterStops(stops, nearbyThreshold),
+        [stops, nearbyThreshold]
+    );
+
+    return (
+        <>
+            {clusters.map((c) => (
+                <Marker
+                    key={`${c.name}:${c.lat.toFixed(5)},${c.lon.toFixed(5)}`}
+                    latitude={c.lat}
+                    longitude={c.lon}
+                    anchor="center"
+                >
+                    <div className="bg-jakarta p-1 rounded-full">
+                        <BusFront
+                            size={10}
+                            strokeWidth={2}
+                            className="text-white"
+                        />
+                    </div>
+                    {showLabels && (
+                        <div className="absolute top-0 left-[2em] leading-none w-24 rounded-sm text-xs font-pt-sans-narrow font-bold">
+                            {c.name}
+                        </div>
+                    )}
+                </Marker>
+            ))}
+        </>
+    );
+});
+
 const MainMapComponent = ({
-    shapes,
+    geometry,
     lineColor = "FFFFFF",
     routeStops,
 }: MainMapComponentProps) => {
-    const zoomThreshold = 13;
-    const nearbyThreshold = 25;
-    const displayedStops = new Set<string>();
+    const zoomThreshold = 12;
+    const labelThreshold = 13;
+    const nearbyThreshold = 55;
 
     const [viewState, setViewState] = useState({
         latitude: -6.1907,
         longitude: 106.8228,
-        zoom: 11,
+        zoom: 10,
     });
 
-    const groupedShapes: Record<string, [number, number][]> = shapes.reduce(
-        (acc, shape) => {
-            if (!acc[shape.shape_id]) {
-                acc[shape.shape_id] = [];
-            }
-            acc[shape.shape_id].push([
-                +shape.shape_pt_lon,
-                +shape.shape_pt_lat,
-            ]);
-            return acc;
-        },
-        {} as Record<string, [number, number][]>
-    );
-
-    const geoJsonData = {
-        type: "FeatureCollection",
-        features: Object.keys(groupedShapes).map((shape_id) => ({
-            type: "Feature",
-            properties: { shape_id },
-            geometry: {
-                type: "LineString",
-                coordinates: groupedShapes[shape_id],
-            },
-        })),
-    };
+    // Quantised so continuous zooming doesn't invalidate the memo every frame.
+    const zoomLevel = Math.floor(viewState.zoom);
 
     return (
-        <Map
+        <MapGL
             {...viewState}
             onMove={(e) => setViewState(e.viewState)}
             style={{ width: "100%", height: "100vh" }}
-            mapStyle={
-                "https://api.maptiler.com/maps/streets/style.json?key=BrpsEqmYwqOM5P8UK511"
-            }
+            mapStyle={MAP_STYLE}
         >
-            <Source id="shape" type="geojson" data={geoJsonData}>
+            <NavigationControl position="bottom-right" />
+
+            <Source id="shape" type="geojson" data={geometry ?? EMPTY_GEOJSON}>
                 <Layer
                     id="shape-line"
                     type="line"
+                    layout={{ "line-join": "round", "line-cap": "round" }}
                     paint={{
                         "line-color": `#${lineColor}`,
                         "line-width": 3,
                     }}
                 />
             </Source>
-            {routeStops.map((stop, index) => {
-                const { stop_lat, stop_lon, stop_name } = stop;
-                const key = `${stop_lat},${stop_lon}`;
 
-                let shouldDisplayName = true;
-                for (const displayedKey of Array.from(displayedStops)) {
-                    const [lat, lon] = displayedKey.split(",").map(parseFloat);
-                    const distance = haversine(+stop_lat, +stop_lon, lat, lon);
-                    if (distance < nearbyThreshold) {
-                        shouldDisplayName = false;
-                        break;
-                    }
-                }
-
-                if (shouldDisplayName) {
-                    displayedStops.add(key);
-                }
-
-                return (
-                    <Marker
-                        key={stop.stop_id}
-                        latitude={+stop_lat}
-                        longitude={+stop_lon}
-                        anchor="center"
-                    >
-                        <div className="bg-jakarta p-1 rounded-full">
-                            <BusFront
-                                size={10}
-                                strokeWidth={2}
-                                className="text-white"
-                            />
-                        </div>
-                        {viewState.zoom >= zoomThreshold &&
-                            shouldDisplayName && (
-                                <div
-                                    style={{
-                                        position: "absolute",
-                                        top: "0",
-                                        left: "2em",
-                                        lineHeight: "1",
-                                        padding: "2px 5px",
-                                        borderRadius: "3px",
-                                        fontSize: "12px",
-                                        textAlign: "center",
-                                        fontWeight: "bold",
-                                        // color: `#${lineColor}`,
-                                    }}
-                                >
-                                    {stop_name}
-                                </div>
-                            )}
-                    </Marker>
-                );
-            })}
-        </Map>
+            {zoomLevel > zoomThreshold && routeStops.length > 0 && (
+                <StopMarkers
+                    stops={routeStops}
+                    showLabels={zoomLevel >= labelThreshold}
+                    nearbyThreshold={nearbyThreshold}
+                />
+            )}
+        </MapGL>
     );
 };
 
