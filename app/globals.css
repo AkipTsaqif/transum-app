@@ -1,7 +1,13 @@
-@import url('https://fonts.googleapis.com/css2?family=Open+Sans&family=PT+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap')
-layer(base);
-@import url('https://fonts.googleapis.com/css2?family=Open+Sans&family=PT+Sans+Narrow:wght@400;700&family=PT+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap')
-layer(base);
+/*
+  Fonts are loaded with `next/font/google` in app/layout.tsx, not with a remote
+  @import here. The bundler strips remote @import rules from the compiled CSS,
+  so the old Google Fonts URLs silently stopped loading -- the font-pt-sans
+  utilities still existed but pointed at families the browser never fetched,
+  and everything fell back to Geist.
+
+  next/font self-hosts the files, removes the render-blocking request, and
+  exposes each family as a CSS variable that @theme maps to below.
+*/
 @import 'tailwindcss';
 @import 'tw-animate-css';
 
@@ -46,16 +52,22 @@ layer(base);
   --color-card: hsl(var(--card));
   --color-card-foreground: hsl(var(--card-foreground));
 
-  --color-jakarta: #0c1b2a;
-  --color-jakarta-selected: #00629f;
+  /*
+    Driven by the --jakarta / --jakarta-selected variables below so the
+    sidebar responds to the theme. Previously these were fixed hex values,
+    which is why toggling dark mode only ever changed the search box and the
+    mode dropdown -- the entire sidebar was pinned to one colour.
+  */
+  --color-jakarta: hsl(var(--jakarta));
+  --color-jakarta-selected: hsl(var(--jakarta-selected));
 
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
 
-  --font-open-sans: 'Open Sans', sans-serif;
-  --font-pt-sans-narrow: 'PT Sans Narrow', sans-serif;
-  --font-pt-sans: 'PT Sans', sans-serif;
+  /* Fed by next/font/google (see app/layout.tsx). */
+  --font-pt-sans: var(--font-pt-sans-src), sans-serif;
+  --font-pt-sans-narrow: var(--font-pt-sans-narrow-src), sans-serif;
 
   --animate-accordion-down: accordion-down 0.2s ease-out;
   --animate-accordion-up: accordion-up 0.2s ease-out;
@@ -123,6 +135,10 @@ layer(base);
         --chart-3: 197 37% 24%;
         --chart-4: 43 74% 66%;
         --chart-5: 27 87% 67%;
+
+        /* Exact originals: #0C1B2A navy, #00629F selected-row blue. */
+        --jakarta: 210 55.56% 10.59%;
+        --jakarta-selected: 203.02 100% 31.18%;
     }
 
     .dark {
@@ -150,6 +166,10 @@ layer(base);
         --chart-3: 30 80% 55%;
         --chart-4: 280 65% 60%;
         --chart-5: 340 75% 55%;
+
+        /* Same hues, darker, so the sidebar recedes behind the map at night. */
+        --jakarta: 210 55.56% 6%;
+        --jakarta-selected: 203.02 100% 24%;
     }
 }
 

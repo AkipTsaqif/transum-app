@@ -122,7 +122,7 @@ export default function Index() {
                         defaultValue="Transjakarta"
                         disabled
                     >
-                        <SelectTrigger className="w-full text-black">
+                        <SelectTrigger className="w-full border-white/20 bg-white/10 text-white [&>svg]:opacity-70">
                             <SelectValue placeholder="Pilih moda" />
                         </SelectTrigger>
                         <SelectContent>
@@ -144,11 +144,19 @@ export default function Index() {
 
                 <Separator />
                 <div className="flex flex-col w-full grow overflow-hidden">
-                    <div className="p-4 text-black">
+                    <div className="p-4">
+                        {/*
+                          The sidebar is always dark navy, so the input cannot
+                          inherit the themed background/foreground -- in dark
+                          mode that rendered near-black text on a near-black
+                          field. Pin it to the sidebar's own palette instead.
+                        */}
                         <Input
                             placeholder="Cari rute"
+                            aria-label="Cari rute"
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
+                            className="border-white/20 bg-white/10 text-white placeholder:text-white/50 focus-visible:ring-white/40 focus-visible:ring-offset-jakarta"
                         />
                     </div>
 
@@ -180,7 +188,7 @@ export default function Index() {
                                         aria-pressed={isSelected}
                                         className={`flex w-[calc(100%+2rem)] text-left items-center gap-2 p-2 text-white cursor-pointer -ml-4 -mr-4 pl-4 pr-4 ${
                                             isSelected
-                                                ? "bg-jakarta-selected hover:bg-[#004C7C]"
+                                                ? "bg-jakarta-selected brightness-100 hover:brightness-110"
                                                 : "hover:bg-white hover:bg-opacity-10"
                                         }`}
                                         onClick={() =>

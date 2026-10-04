@@ -1,8 +1,29 @@
 import { ThemeSwitcher } from "@/components/theme-switcher";
-import { GeistSans } from "geist/font/sans";
+import { PT_Sans, PT_Sans_Narrow } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import "./globals.css";
 import "maplibre-gl/dist/maplibre-gl.css";
+
+/*
+ * Self-hosted via next/font so there is no render-blocking Google Fonts
+ * request -- and, more importantly, no remote @import for the bundler to strip
+ * out of globals.css (which is what silently killed these fonts before).
+ * Each family is exposed as a CSS variable consumed by @theme in globals.css.
+ */
+const ptSans = PT_Sans({
+    subsets: ["latin"],
+    weight: ["400", "700"],
+    style: ["normal", "italic"],
+    variable: "--font-pt-sans-src",
+    display: "swap",
+});
+
+const ptSansNarrow = PT_Sans_Narrow({
+    subsets: ["latin"],
+    weight: ["400", "700"],
+    variable: "--font-pt-sans-narrow-src",
+    display: "swap",
+});
 
 const defaultUrl = process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
@@ -31,10 +52,10 @@ export default function RootLayout({
     return (
         <html
             lang="id"
-            className={GeistSans.className}
+            className={`${ptSans.variable} ${ptSansNarrow.variable}`}
             suppressHydrationWarning
         >
-            <body className="bg-background text-foreground">
+            <body className="font-pt-sans bg-background text-foreground">
                 <ThemeProvider
                     attribute="class"
                     defaultTheme="system"
