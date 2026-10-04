@@ -6,20 +6,63 @@ import MapGL, {
     NavigationControl,
     Source,
 } from "react-map-gl/maplibre";
+import { setWorkerUrl, type StyleSpecification } from "maplibre-gl";
 import React, { useMemo, useState } from "react";
 import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
 import { BusFront } from "lucide-react";
 import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
+
+/**
+ * MapLibre v6 loads its tile-processing worker from a URL it derives from its
+ * own `import.meta.url`. A bundler content-hashes that filename, so the
+ * derived path 404s and the worker never starts -- the map then renders its
+ * background and silently requests no tiles.
+ *
+ * `scripts/copy-maplibre-worker.mjs` places the worker (and the sibling chunk
+ * it imports) in `public/maplibre/`, so point MapLibre at that stable path.
+ * Must happen before the first Map is constructed; module scope guarantees it.
+ */
+if (typeof window !== "undefined") {
+    setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
+}
 
 const EMPTY_GEOJSON: ShapeCollection = {
     type: "FeatureCollection",
     features: [],
 };
 
-const MAP_STYLE = process.env.NEXT_PUBLIC_MAPTILER_KEY
+/**
+ * Keyless fallback basemap: OpenStreetMap raster tiles.
+ *
+ * NOT `demotiles.maplibre.org` -- that style is a world *political* map with
+ * only country outlines and a #D8F2FF background, so at city zoom it is an
+ * empty pale-blue canvas with no streets. It looks broken for a transit map.
+ *
+ * OSM tiles need no key, but do have a usage policy (no heavy/commercial
+ * traffic): https://operations.osmfoundation.org/policies/tiles/
+ * Set NEXT_PUBLIC_MAPTILER_KEY for production.
+ */
+const OSM_FALLBACK_STYLE: StyleSpecification = {
+    version: 8,
+    sources: {
+        osm: {
+            type: "raster",
+            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tileSize: 256,
+            maxzoom: 19,
+            attribution:
+                '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        },
+    },
+    layers: [
+        { id: "osm", type: "raster", source: "osm" },
+    ],
+};
+
+const MAP_STYLE: string | StyleSpecification = process.env
+    .NEXT_PUBLIC_MAPTILER_KEY
     ? `https://api.maptiler.com/maps/streets/style.json?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}`
-    : // Keyless fallback so the map still renders on a fresh clone.
-      "https://demotiles.maplibre.org/style.json";
+    : OSM_FALLBACK_STYLE;
 
 interface MainMapComponentProps {
     geometry: ShapeCollection | null;
