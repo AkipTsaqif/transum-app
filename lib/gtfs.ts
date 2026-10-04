@@ -3,8 +3,10 @@ import path from "node:path";
 import type {
     RouteDetail,
     RouteSummary,
+    ShapeCollection,
     StationDetail,
     StationIndexEntry,
+    StationRoute,
 } from "@/utils/types/gtfs";
 
 const DATA_DIR = path.join(process.cwd(), "data", "gtfs");
@@ -76,8 +78,15 @@ async function expand(
         lon: station.lon,
         platforms: station.platforms,
         routes: station.routes
-            .map((id) => byId.get(id))
-            .filter((r): r is RouteSummary => Boolean(r))
+            .map((id): StationRoute | undefined => {
+                const r = byId.get(id);
+                if (!r) return undefined;
+                const pos = station.positions?.[id];
+                return pos
+                    ? { ...r, position: pos[0], totalStops: pos[1] }
+                    : r;
+            })
+            .filter((r): r is StationRoute => Boolean(r))
             .sort((a, b) =>
                 a.route_short_name.localeCompare(b.route_short_name, "en", {
                     numeric: true,
@@ -141,6 +150,24 @@ export async function resolveStation(
     if (!best || bestDist > 500) return null;
 
     return expand(best);
+}
+
+let overviewCache: ShapeCollection | null = null;
+
+/**
+ * Every route as one simplified FeatureCollection (~194 KB gzipped), drawn
+ * faintly when nothing is selected. Simplified to ~11 m, which is sub-pixel at
+ * the zooms this renders at; per-route geometry stays full fidelity.
+ */
+export async function getOverview(): Promise<ShapeCollection> {
+    if (overviewCache) return overviewCache;
+
+    const raw = await fs.readFile(
+        path.join(DATA_DIR, "overview.json"),
+        "utf-8"
+    );
+    overviewCache = JSON.parse(raw) as ShapeCollection;
+    return overviewCache;
 }
 
 export async function getSyncMeta() {

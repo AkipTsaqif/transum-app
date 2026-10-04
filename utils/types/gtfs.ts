@@ -22,6 +22,8 @@ export interface RouteStop {
     stop_name: string;
     stop_lat: number;
     stop_lon: number;
+    /** 1-based position along the route, for "halte ke-12 dari 28". */
+    sequence: number;
 }
 
 export interface ShapeFeature {
@@ -64,6 +66,14 @@ export interface StationIndexEntry {
     platforms: number;
     /** route_ids calling at this station. */
     routes: string[];
+    /** route_id -> [position along that route, total stops on it]. */
+    positions: Record<string, [number, number]>;
+}
+
+/** A route calling at a station, with where along it the station sits. */
+export interface StationRoute extends RouteSummary {
+    position?: number;
+    totalStops?: number;
 }
 
 /** What `/api/gtfs/stops/:id` returns: ~1-3 KB. */
@@ -73,7 +83,7 @@ export interface StationDetail {
     lat: number;
     lon: number;
     platforms: number;
-    routes: RouteSummary[];
+    routes: StationRoute[];
 }
 
 /** A route drawn on the map, paired with the colour to draw it in. */

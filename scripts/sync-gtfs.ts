@@ -136,6 +136,52 @@ async function hasBakedData(): Promise<boolean> {
 export const routeFileName = (routeId: string) =>
     `${encodeURIComponent(routeId)}.json`;
 
+/** Perpendicular distance from point `p` to segment `a`-`b`, in degrees. */
+function perpendicularDistance(
+    p: [number, number],
+    a: [number, number],
+    b: [number, number]
+) {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    if (dx === 0 && dy === 0) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+    const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy);
+    const clamped = Math.max(0, Math.min(1, t));
+    return Math.hypot(p[0] - (a[0] + clamped * dx), p[1] - (a[1] + clamped * dy));
+}
+
+/**
+ * Ramer-Douglas-Peucker line simplification. Used only for the city-wide
+ * overview layer, where an 11 m deviation is sub-pixel at the zooms it renders
+ * at. Per-route geometry stays at full fidelity.
+ */
+function simplifyLine(
+    points: [number, number][],
+    tolerance: number
+): [number, number][] {
+    if (points.length < 3) return points;
+
+    let maxDist = 0;
+    let index = 0;
+    const first = points[0];
+    const last = points[points.length - 1];
+
+    for (let i = 1; i < points.length - 1; i++) {
+        const d = perpendicularDistance(points[i], first, last);
+        if (d > maxDist) {
+            maxDist = d;
+            index = i;
+        }
+    }
+
+    if (maxDist <= tolerance) return [first, last];
+
+    return [
+        ...simplifyLine(points.slice(0, index + 1), tolerance).slice(0, -1),
+        ...simplifyLine(points.slice(index), tolerance),
+    ];
+}
+
 /** Metres between two lat/lon pairs. */
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
     const R = 6371e3;
@@ -321,16 +367,27 @@ async function main() {
 
         if (features.length === 0) withoutGeometry++;
 
-        // Unique stops served by this route, in first-encountered order.
+        // Unique stops served by this route, in call order.
+        //
+        // `stop_sequence` is per *trip*, and a route has many trips (both
+        // directions). Walking the longest trip first gives a stable, sensible
+        // ordering; stops only reachable on other trips are appended after.
         const seen = new Set<string>();
         const routeStops: Array<{
             stop_id: string;
             stop_name: string;
             stop_lat: number;
             stop_lon: number;
+            sequence: number;
         }> = [];
 
-        for (const t of myTrips) {
+        const tripsByLength = [...myTrips].sort(
+            (a, b) =>
+                (stopTimesByTrip.get(b.trip_id)?.length ?? 0) -
+                (stopTimesByTrip.get(a.trip_id)?.length ?? 0)
+        );
+
+        for (const t of tripsByLength) {
             for (const st of stopTimesByTrip.get(t.trip_id) ?? []) {
                 if (seen.has(st.stop_id)) continue;
                 seen.add(st.stop_id);
@@ -341,6 +398,8 @@ async function main() {
                     stop_name: s.stop_name,
                     stop_lat: round(Number(s.stop_lat)),
                     stop_lon: round(Number(s.stop_lon)),
+                    // 1-based position for display ("halte ke-12 dari 28").
+                    sequence: routeStops.length + 1,
                 });
             }
         }
@@ -431,8 +490,23 @@ async function main() {
 
     const stations = [...byName.values()].flat();
 
-    // One index file rather than 6437 tiny ones: the whole thing is ~830 KB
-    // raw / ~90 KB gzipped, cheaper to serve once than to pay a request per
+    // Where each station falls along each route, so the UI can say
+    // "halte ke-12 dari 28". Keyed route_id -> stop_id -> [position, total].
+    const positionByRouteStop = new Map<string, Map<string, [number, number]>>();
+    for (const r of routes) {
+        const file = JSON.parse(
+            await fs.readFile(
+                path.join(ROUTES_DIR, routeFileName(r.route_id)),
+                "utf-8"
+            )
+        ) as { stops: Array<{ stop_id: string; sequence: number }> };
+        const inner = new Map<string, [number, number]>();
+        for (const s of file.stops) inner.set(s.stop_id, [s.sequence, file.stops.length]);
+        positionByRouteStop.set(r.route_id, inner);
+    }
+
+    // One index file rather than 6437 tiny ones: the whole thing is ~930 KB
+    // raw / ~200 KB gzipped, cheaper to serve once than to pay a request per
     // stop, and it avoids adding thousands of near-empty objects to git.
     // Route metadata is already in routes.json, so only ids are stored here.
     const stationIndex = stations.map((st) => ({
@@ -442,11 +516,102 @@ async function main() {
         lon: round(st.lon),
         platforms: st.count,
         routes: [...st.routes].sort(),
+        // route_id -> [position, total] for any member platform.
+        positions: Object.fromEntries(
+            [...st.routes]
+                .map((rid) => {
+                    const inner = positionByRouteStop.get(rid);
+                    for (const sid of st.stopIds) {
+                        const hit = inner?.get(sid);
+                        if (hit) return [rid, hit] as const;
+                    }
+                    return null;
+                })
+                .filter((x): x is readonly [string, [number, number]] => !!x)
+        ),
     }));
 
     await fs.writeFile(
         path.join(DATA_DIR, "stops.json"),
         JSON.stringify(stationIndex)
+    );
+
+    // ---------------------------------------------------------------- overview
+    //
+    // Every route in one simplified FeatureCollection, drawn faintly when
+    // nothing is selected so the app opens looking like a transit map rather
+    // than an empty basemap. Fetching the 240 real route files instead would
+    // be 240 requests and ~800 KB gzipped; this is one request and ~180 KB.
+    const OVERVIEW_TOLERANCE = 0.0002; // ~22 m, still sub-pixel below zoom 14
+    const OVERVIEW_PRECISION = 5; // ~1.1 m, ample for a context layer
+
+    interface OverviewFeature {
+        type: "Feature";
+        properties: { color: string };
+        geometry: { type: "LineString"; coordinates: [number, number][] };
+    }
+
+    const ovRound = (n: number) =>
+        Number.parseFloat(n.toFixed(OVERVIEW_PRECISION));
+
+    const overviewFeatures: OverviewFeature[] = [];
+    // Shapes are shared between routes and directions; draw each once.
+    const drawnShapes = new Set<string>();
+
+    for (const r of routes) {
+        const color = /^[0-9a-f]{6}$/i.test(r.route_color ?? "")
+            ? r.route_color
+            : "6B7280";
+
+        const shapeIds = [
+            ...new Set(
+                (tripsByRoute.get(r.route_id) ?? [])
+                    .map((t) => t.shape_id)
+                    .filter(Boolean)
+            ),
+        ];
+
+        for (const id of shapeIds) {
+            if (drawnShapes.has(id)) continue;
+            drawnShapes.add(id);
+
+            const pts = shapesById.get(id);
+            if (!pts) continue;
+
+            const coords = simplifyLine(
+                pts.map(
+                    (p) =>
+                        [
+                            ovRound(Number(p.shape_pt_lon)),
+                            ovRound(Number(p.shape_pt_lat)),
+                        ] as [number, number]
+                ),
+                OVERVIEW_TOLERANCE
+            );
+            if (coords.length < 2) continue;
+
+            overviewFeatures.push({
+                type: "Feature",
+                properties: { color: `#${color}` },
+                geometry: { type: "LineString", coordinates: coords },
+            });
+        }
+    }
+
+    const overview = JSON.stringify({
+        type: "FeatureCollection",
+        features: overviewFeatures,
+    });
+    await fs.writeFile(path.join(DATA_DIR, "overview.json"), overview);
+
+    const overviewPoints = overviewFeatures.reduce(
+        (a, f) => a + f.geometry.coordinates.length,
+        0
+    );
+    console.log(
+        `\u2713 Baked overview: ${overviewFeatures.length} lines, ` +
+            `${overviewPoints.toLocaleString()} points, ` +
+            `${(overview.length / 1048576).toFixed(2)} MB raw`
     );
 
     const stationRouteCounts = stationIndex.map((s) => s.routes.length);

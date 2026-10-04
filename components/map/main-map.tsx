@@ -79,6 +79,8 @@ interface MainMapComponentProps {
     /** One entry per route to draw. Multiple when a stop is selected. */
     layers: DrawnLayer[];
     routeStops: RouteStop[];
+    /** Every route, faint, shown only when nothing is selected. */
+    overview?: ShapeCollection | null;
     /** Pin for the currently selected station, if any. */
     activeStop?: { lat: number; lon: number; name: string } | null;
     onStopClick?: (stop: RouteStop) => void;
@@ -228,6 +230,7 @@ const StopMarkers = React.memo(function StopMarkers({
 const MainMapComponent = ({
     layers,
     routeStops,
+    overview,
     activeStop,
     onStopClick,
 }: MainMapComponentProps) => {
@@ -305,6 +308,37 @@ const MainMapComponent = ({
             mapStyle={MAP_STYLE}
         >
             <NavigationControl position="bottom-right" />
+
+            {/*
+              The whole network, faint, as context. One GPU-rendered GeoJSON
+              source -- not 240 React layers. Hidden once a route or stop is
+              selected so the selection reads clearly.
+            */}
+            {overview && layers.length === 0 && (
+                <Source id="overview" type="geojson" data={overview}>
+                    <Layer
+                        id="overview-line"
+                        type="line"
+                        layout={{ "line-join": "round", "line-cap": "round" }}
+                        paint={{
+                            // Colour travels in the feature, so all 700 lines
+                            // stay a single draw call.
+                            "line-color": ["get", "color"],
+                            "line-opacity": 0.35,
+                            // Thinner when zoomed out, where lines bunch up.
+                            "line-width": [
+                                "interpolate",
+                                ["linear"],
+                                ["zoom"],
+                                9,
+                                1,
+                                13,
+                                2.5,
+                            ],
+                        }}
+                    />
+                </Source>
+            )}
 
             {/* A Source per route so each keeps its own colour. */}
             {layers.length === 0 ? (

@@ -19,6 +19,7 @@ import type {
     RouteDetail,
     RouteStop,
     RouteSummary,
+    ShapeCollection,
     StationDetail,
 } from "@/utils/types/gtfs";
 import { ArrowLeft, MapPin } from "lucide-react";
@@ -42,6 +43,9 @@ export default function Index() {
     const [sheetOpen, setSheetOpen] = useState(false);
 
     // Stop view: the clicked station, plus every route that calls there.
+    // Faint city-wide network, shown only when nothing is selected.
+    const [overview, setOverview] = useState<ShapeCollection | null>(null);
+
     const [station, setStation] = useState<StationDetail | null>(null);
     const [stationLoading, setStationLoading] = useState(false);
     const [stationError, setStationError] = useState<string | null>(null);
@@ -75,6 +79,27 @@ export default function Index() {
             cancelled = true;
         };
     }, [selectedMode]);
+
+    // Load the overview once, after the route list -- it is context, not
+    // content, so it must never delay the interactive part of the page.
+    useEffect(() => {
+        let cancelled = false;
+
+        (async () => {
+            try {
+                const res = await fetch("/api/gtfs/overview");
+                if (!res.ok) return;
+                const data: ShapeCollection = await res.json();
+                if (!cancelled) setOverview(data);
+            } catch {
+                // Non-fatal: the map simply opens without the faint network.
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     // Fetch one route's geometry + stops on selection (~27 KB).
     // An AbortController keeps fast clicking from racing stale responses in.
@@ -406,6 +431,7 @@ export default function Index() {
                 <MainMapComponent
                     layers={layers}
                     routeStops={visibleStops}
+                    overview={overview}
                     activeStop={
                         station
                             ? {
@@ -494,7 +520,16 @@ function StopPanel({
                     >
                         {r.route_short_name}
                     </div>
-                    <div className="flex-1 font-pt-sans">{r.route_long_name}</div>
+                    <div className="min-w-0 flex-1">
+                        <div className="font-pt-sans">{r.route_long_name}</div>
+                        {r.position && r.totalStops && (
+                            <div className="text-xs text-white/50">
+                                Halte ke-{r.position} dari {r.totalStops}
+                                {r.position === 1 && " \u00b7 awal"}
+                                {r.position === r.totalStops && " \u00b7 akhir"}
+                            </div>
+                        )}
+                    </div>
                 </button>
             ))}
         </div>
