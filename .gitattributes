@@ -1,0 +1,15 @@
+# Normalise line endings to LF in the repository.
+#
+# This project is edited from both Windows and Linux. Without this, a Windows
+# editor rewrites whole files to CRLF and every line shows as changed, burying
+# real work in thousands of lines of whitespace-only diff.
+* text=auto eol=lf
+
+# Binary assets must never be touched.
+*.png binary
+*.jpg binary
+*.ico binary
+*.pbf binary
+*.woff binary
+*.woff2 binary
+*.zip binary

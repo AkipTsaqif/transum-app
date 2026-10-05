@@ -36,6 +36,12 @@ const FONTS = [
         stack: "PT Sans Bold",
         url: "https://fonts.gstatic.com/s/ptsans/v18/jizfRExUiTo99u79B_mh4Ok.ttf",
     },
+    {
+        // Basemap labels (place names, streets). Regular rather than Bold so
+        // the basemap reads as background and our stop names stay dominant.
+        stack: "PT Sans Regular",
+        url: "https://fonts.gstatic.com/s/ptsans/v18/jizaRExUiTo99u79P0U.ttf",
+    },
 ];
 
 const OUT = path.join(process.cwd(), "public", "glyphs");
@@ -191,7 +197,13 @@ function renderGlyph(glyph, scale, font) {
     //
     // So: take the path as-is (k = 1) and sample rows directly in its own
     // down-positive space.
-    const SS = 4;
+    // Vertical supersampling. Horizontal coverage is already exact (the
+    // scanline computes analytic span overlap per pixel), but vertically each
+    // pixel only sees SS samples -- so SS caps how many distinct coverage
+    // levels a near-horizontal edge can take, and the SDF inherits that cap.
+    // 16 brings vertical resolution closer to the horizontal, at a build cost
+    // measured in seconds.
+    const SS = 16;
     const mask = new Float64Array(w * h);
     const commands = glyph.getPath(0, 0, SIZE, { hinting: false }).commands;
 
@@ -226,22 +238,24 @@ function renderGlyph(glyph, scale, font) {
         }
     }
 
-    // Distance transform over the coverage mask.
-    const alpha = new Uint8ClampedArray(w * h);
-    for (let i = 0; i < mask.length; i++) {
-        alpha[i] = Math.max(0, Math.min(255, Math.round(mask[i] * 255)));
-    }
-
+    // Signed distance field from the *fractional* coverage mask.
+    //
+    // The coverage values carry the sub-pixel position of each edge, which is
+    // the only thing that distinguishes a 3.2px stem from a 3.8px one at this
+    // size. Thresholding the mask to a boolean before measuring distance (as
+    // this did originally) throws that away: every distance collapses to
+    // hypot(integer, integer), the field takes ~21 values instead of ~226, and
+    // stems snap to whole pixels -- so identical letters render at visibly
+    // different weights depending on where they happened to land on the grid.
     const bitmap = Buffer.alloc(w * h);
-    for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-            const d = signedDistance(alpha, w, h, x, y);
-            // MapLibre decodes: alpha = (value/255 - cutoff) * radius
-            const v = 255 - Math.max(0, Math.min(255, Math.round(
-                (d / RADIUS + CUTOFF) * 255
-            )));
-            bitmap[y * w + x] = v;
-        }
+    const sdf = signedDistanceField(mask, w, h);
+    for (let i = 0; i < sdf.length; i++) {
+        // MapLibre decodes: alpha = (value/255 - cutoff) * radius, and our
+        // glyphs are stored inverted relative to that (see the row dumps in
+        // the diagnosis), so keep the same polarity the renderer already sees.
+        bitmap[i] = 255 - Math.max(0, Math.min(255, Math.round(
+            (sdf[i] / RADIUS + CUTOFF) * 255
+        )));
     }
 
     // The protobuf carries the *padded* bitmap but the *unpadded* metrics:
@@ -351,26 +365,103 @@ function scanline(polys, y) {
     return xs;
 }
 
-/** Approximate signed distance (px) from a coverage bitmap. */
-function signedDistance(alpha, w, h, x, y) {
-    const inside = alpha[y * w + x] > 127;
-    let best = RADIUS;
+/**
+ * Exact Euclidean distance transform of a binary mask (Felzenszwalb &
+ * Huttenlocher): squared distance, one pass per axis, O(n) per row/column.
+ *
+ * `f` holds the per-cell seed cost (0 inside the set, INF outside); the result
+ * is written back into `f` as squared distances.
+ */
+function edt1d(f, d, v, z, n) {
+    v[0] = 0;
+    z[0] = -INF;
+    z[1] = INF;
+    d[0] = f[0];
 
-    const r = Math.ceil(RADIUS);
-    for (let dy = -r; dy <= r; dy++) {
-        const yy = y + dy;
-        if (yy < 0 || yy >= h) continue;
-        for (let dx = -r; dx <= r; dx++) {
-            const xx = x + dx;
-            if (xx < 0 || xx >= w) continue;
-            const other = alpha[yy * w + xx] > 127;
-            if (other === inside) continue;
-            const d = Math.hypot(dx, dy);
-            if (d < best) best = d;
+    for (let q = 1, k = 0, s = 0; q < n; q++) {
+        do {
+            const r = v[k];
+            s = (f[q] - f[r] + q * q - r * r) / (2 * q - 2 * r);
+        } while (s <= z[k] && --k > -1);
+
+        k++;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = INF;
+    }
+
+    for (let q = 0, k = 0; q < n; q++) {
+        while (z[k + 1] < q) k++;
+        const r = v[k];
+        const dx = q - r;
+        d[q] = f[r] + dx * dx;
+    }
+}
+
+/** 2D exact EDT over a grid of seed costs, in place. */
+function edt2d(data, w, h, f, d, v, z) {
+    for (let x = 0; x < w; x++) {
+        for (let y = 0; y < h; y++) f[y] = data[y * w + x];
+        edt1d(f, d, v, z, h);
+        for (let y = 0; y < h; y++) data[y * w + x] = d[y];
+    }
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) f[x] = data[y * w + x];
+        edt1d(f, d, v, z, w);
+        for (let x = 0; x < w; x++) data[y * w + x] = Math.sqrt(d[x]);
+    }
+}
+
+const INF = 1e20;
+
+/**
+ * Signed distance field (in pixels) from a fractional coverage mask.
+ *
+ * This is the approach @mapbox/tiny-sdf uses. Two exact Euclidean distance
+ * transforms are run -- one over the glyph, one over its complement -- and
+ * subtracted, which yields a smooth signed field.
+ *
+ * The sub-pixel refinement is what the old implementation lacked: a cell with
+ * partial coverage `a` sits roughly `0.5 - a` pixels from the true edge, so
+ * seeding the transform with that offset (rather than a hard 0/INF) recovers
+ * the fractional edge position instead of quantising it to the pixel grid.
+ */
+function signedDistanceField(mask, w, h) {
+    const n = w * h;
+    const gridOuter = new Float64Array(n);
+    const gridInner = new Float64Array(n);
+    const size = Math.max(w, h);
+    const f = new Float64Array(size);
+    const d = new Float64Array(size);
+    const v = new Int32Array(size + 1);
+    const z = new Float64Array(size + 1);
+
+    for (let i = 0; i < n; i++) {
+        const a = Math.min(1, Math.max(0, mask[i]));
+        if (a === 0) {
+            gridOuter[i] = INF;
+            gridInner[i] = 0;
+        } else if (a === 1) {
+            gridOuter[i] = 0;
+            gridInner[i] = INF;
+        } else {
+            // Distance from this cell's centre to the edge passing through it.
+            const dd = 0.5 - a;
+            gridOuter[i] = dd > 0 ? dd * dd : 0;
+            gridInner[i] = dd < 0 ? dd * dd : 0;
         }
     }
 
-    return inside ? -best : best;
+    edt2d(gridOuter, w, h, f, d, v, z);
+    edt2d(gridInner, w, h, f, d, v, z);
+
+    const out = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+        // Positive outside, negative inside, clamped to the encodable range.
+        const dist = gridOuter[i] - gridInner[i];
+        out[i] = Math.max(-RADIUS, Math.min(RADIUS, dist));
+    }
+    return out;
 }
 
 async function main() {

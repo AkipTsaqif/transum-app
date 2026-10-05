@@ -8,8 +8,10 @@ import MapGL, {
 } from "react-map-gl/maplibre";
 import {
     setWorkerUrl,
+    type ExpressionSpecification,
     type LngLatBoundsLike,
     type StyleSpecification,
+    type VariableAnchorOffsetCollectionSpecification,
 } from "maplibre-gl";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FeatureCollection, Point } from "geojson";
@@ -70,6 +72,71 @@ const mapStyleFor = (dark: boolean): string =>
  */
 const GLYPHS_URL = "/glyphs/{fontstack}/{range}.pbf";
 const LABEL_FONT = ["PT Sans Narrow Bold"];
+
+/**
+ * Pin images, registered with the map so the stop marker can be an *icon of
+ * the symbol layer* rather than a separate circle layer.
+ *
+ * This matters for placement: MapLibre's collision engine only considers
+ * symbols. A circle layer contributes no collision box, so labels happily sat
+ * underneath neighbouring pins. Once the pin is `icon-image` on the same
+ * symbol, its box is part of the symbol and `text-variable-anchor` moves the
+ * label clear of every pin, not just of other labels.
+ */
+function makeDotImage(
+    { r, stroke, fill, ring }: DotSpec,
+    pixelRatio = 2
+): ImageData {
+    const size = Math.ceil((r + stroke) * 2 * pixelRatio);
+    const c = document.createElement("canvas");
+    c.width = size;
+    c.height = size;
+
+    const ctx = c.getContext("2d")!;
+    ctx.scale(pixelRatio, pixelRatio);
+
+    const mid = size / pixelRatio / 2;
+    ctx.beginPath();
+    ctx.arc(mid, mid, r, 0, Math.PI * 2);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.lineWidth = stroke;
+    ctx.strokeStyle = ring;
+    ctx.stroke();
+
+    return ctx.getImageData(0, 0, size, size);
+}
+
+interface DotSpec {
+    r: number;
+    stroke: number;
+    fill: string;
+    ring: string;
+}
+
+/**
+ * Every pin image the map registers, keyed by the id the layers refer to.
+ *
+ * `all-stop-dot` is drawn small and scaled up by `icon-size`; a single image
+ * reused across the zoom range beats registering one per zoom step.
+ */
+const PIN_IMAGES: Record<string, DotSpec> = {
+    "stop-pin": { r: 5, stroke: 2, fill: "#0C1B2A", ring: "#FFFFFF" },
+    "stop-pin-active": { r: 7, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
+    "all-stop-dot": { r: 3, stroke: 1.5, fill: "#0C1B2A", ring: "#FFFFFF" },
+};
+
+/**
+ * The blocker icon: a fully transparent square whose only job is to occupy a
+ * collision box the width of the drawn route line (3px) plus a little margin.
+ */
+function makeBlockerImage(size = 9, pixelRatio = 2): ImageData {
+    const px = Math.ceil(size * pixelRatio);
+    const c = document.createElement("canvas");
+    c.width = px;
+    c.height = px;
+    return c.getContext("2d")!.getImageData(0, 0, px, px);
+}
 
 export interface DrawnLayer {
     id: string;
@@ -135,6 +202,203 @@ function geometryBounds(
 }
 
 /**
+ * The eight variable anchors as unit vectors, in MapLibre's offset
+ * convention: +x pushes the label right of the pin, +y pushes it *down*.
+ *
+ * `evaluateVariableOffset` in MapLibre derives these from `text-radial-offset`
+ * itself, splitting diagonals by 1/sqrt2 so every anchor sits on a circle of
+ * the same radius. We reproduce that here because we need to reorder the
+ * anchors per feature, which `text-radial-offset` cannot express.
+ */
+const SQRT1_2 = Math.SQRT1_2;
+const ANCHOR_UNITS: Record<string, [number, number]> = {
+    left: [1, 0],
+    right: [-1, 0],
+    top: [0, 1],
+    bottom: [0, -1],
+    "top-left": [SQRT1_2, SQRT1_2],
+    "top-right": [-SQRT1_2, SQRT1_2],
+    "bottom-left": [SQRT1_2, -SQRT1_2],
+    "bottom-right": [-SQRT1_2, -SQRT1_2],
+};
+
+/**
+ * Anchor candidates per route bearing, perpendicular to the line first.
+ *
+ * The collision engine cannot see line layers -- a line contributes no
+ * collision box -- so no amount of `text-allow-overlap` tuning stops a label
+ * from landing on the route. The fix is to stop *offering* the bad anchors:
+ * MapLibre walks this array in order and takes the first that fits.
+ *
+ * Each row therefore (a) leads with the two anchors perpendicular to the line
+ * and (b) omits the two that run *along* it. A label offset parallel to the
+ * line sits at the line's own screen position, so those anchors are never an
+ * acceptable answer -- offering them as a fallback is what still produced a
+ * struck-through label once a neighbouring label took the good side. With
+ * them gone the label either finds a clear side or is dropped, and
+ * `text-optional` keeps the pin either way.
+ *
+ * Index is the quantised bearing of the line through the stop:
+ *   0 = E-W line   -> prefer top/bottom,          never left/right
+ *   1 = NE-SW line -> prefer top-left/bottom-right, never top-right/bottom-left
+ *   2 = N-S line   -> prefer left/right,          never top/bottom
+ *   3 = NW-SE line -> prefer top-right/bottom-left, never top-left/bottom-right
+ */
+const ANCHOR_ORDER: string[][] = [
+    ["top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right"],
+    ["top-left", "bottom-right", "top", "bottom", "left", "right"],
+    ["left", "right", "top-left", "bottom-left", "top-right", "bottom-right"],
+    ["top-right", "bottom-left", "top", "bottom", "left", "right"],
+];
+
+/**
+ * Builds the `text-variable-anchor-offset` value for one bearing bucket.
+ *
+ * The property supersedes `text-variable-anchor` + `text-radial-offset` (see
+ * `getTextVariableAnchorOffset` upstream) and, unlike those two, is
+ * data-driven -- which is the whole reason for this approach: the preferred
+ * side has to vary per stop, and `text-variable-anchor` is data-constant.
+ */
+function anchorOffsetsFor(
+    axis: number,
+    radius: number
+): VariableAnchorOffsetCollectionSpecification {
+    return ANCHOR_ORDER[axis].flatMap((anchor) => {
+        const [ux, uy] = ANCHOR_UNITS[anchor];
+        return [
+            anchor,
+            [+(ux * radius).toFixed(3), +(uy * radius).toFixed(3)] as [
+                number,
+                number,
+            ],
+        ];
+    }) as VariableAnchorOffsetCollectionSpecification;
+}
+
+/** `text-variable-anchor-offset` expression: picks an order by `axis`. */
+function anchorOffsetExpression(radius: number): ExpressionSpecification {
+    return [
+        "match",
+        ["get", "axis"],
+        ...ANCHOR_ORDER.flatMap((_, i) => [
+            i,
+            ["literal", anchorOffsetsFor(i, radius)],
+        ]),
+        ["literal", anchorOffsetsFor(0, radius)],
+    ] as unknown as ExpressionSpecification;
+}
+
+/**
+ * Densifies route lines into points spaced ~`stepPx` apart on screen, for the
+ * invisible blocker symbols that give the line a collision footprint.
+ *
+ * MapLibre's collision engine only indexes symbols, so a line layer is
+ * invisible to it and a label will happily sit on the route. Ordering anchors
+ * by bearing (above) biases placement away from the line, but cannot *stop*
+ * it: where the corridor doubles back there is no clear side, and the label
+ * still lands on a strand. Giving the line real collision boxes is what makes
+ * "never overlap the route" enforceable rather than merely preferred.
+ *
+ * Spacing is in metres derived from the zoom, so the chain stays dense enough
+ * to be continuous without emitting more points than the grid can index.
+ */
+function blockerPoints(
+    shapes: ShapeCollection | null | undefined,
+    zoom: number
+): FeatureCollection {
+    const features: FeatureCollection["features"] = [];
+    if (!shapes?.features?.length) {
+        return { type: "FeatureCollection", features };
+    }
+
+    // Metres per pixel at this zoom (equator); good enough for spacing.
+    const mpp = 156543.03392 / Math.pow(2, zoom);
+    const stepM = Math.max(8, mpp * 10);
+
+    for (const f of shapes.features) {
+        const co = f.geometry?.coordinates;
+        if (!co || co.length < 2) continue;
+
+        let carry = 0;
+        for (let i = 0; i + 1 < co.length; i++) {
+            const [lon1, lat1] = co[i];
+            const [lon2, lat2] = co[i + 1];
+            const segM = haversine(lat1, lon1, lat2, lon2);
+            if (!Number.isFinite(segM) || segM === 0) continue;
+
+            // Walk the segment, dropping a point every `stepM`.
+            for (let d = carry; d < segM; d += stepM) {
+                const t = d / segM;
+                features.push({
+                    type: "Feature",
+                    properties: {},
+                    geometry: {
+                        type: "Point",
+                        coordinates: [
+                            lon1 + (lon2 - lon1) * t,
+                            lat1 + (lat2 - lat1) * t,
+                        ],
+                    },
+                });
+            }
+            carry = (carry - segM) % stepM;
+            if (carry < 0) carry += stepM;
+        }
+    }
+
+    return { type: "FeatureCollection", features };
+}
+
+/**
+ * Quantises a line's local direction at `[lon, lat]` into one of the four
+ * buckets above, by finding the nearest shape vertex and measuring the
+ * segment through it.
+ *
+ * Longitude is scaled by cos(lat) so the bearing is measured in approximately
+ * equal-distance space; at Jakarta's latitude the raw degree ratio would skew
+ * every bearing by a few degrees, which is enough to pick the wrong bucket on
+ * a near-diagonal run.
+ */
+function lineAxisAt(
+    lon: number,
+    lat: number,
+    shapes: ShapeCollection | null | undefined
+): number {
+    if (!shapes?.features?.length) return 0;
+
+    const kx = Math.cos((lat * Math.PI) / 180);
+    let best = Infinity;
+    let bx = 0;
+    let by = 0;
+
+    for (const f of shapes.features) {
+        const co = f.geometry?.coordinates;
+        if (!co || co.length < 2) continue;
+
+        for (let i = 0; i < co.length; i++) {
+            const dx = (co[i][0] - lon) * kx;
+            const dy = co[i][1] - lat;
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= best) continue;
+
+            best = d2;
+            // Direction of the segment spanning this vertex.
+            const a = co[i === 0 ? 0 : i - 1];
+            const b = co[i === co.length - 1 ? co.length - 1 : i + 1];
+            bx = (b[0] - a[0]) * kx;
+            by = b[1] - a[1];
+        }
+    }
+
+    if (bx === 0 && by === 0) return 0;
+
+    // Undirected line: fold to [0, 180), then quantise to 4 buckets of 45deg.
+    let deg = (Math.atan2(by, bx) * 180) / Math.PI;
+    if (deg < 0) deg += 180;
+    return Math.round(deg / 45) % 4;
+}
+
+/**
  * Merges stops that share a base name and sit within `nearbyThreshold` metres,
  * so a stop and its "Sbr." (across-the-road) twin render as one pin.
  *
@@ -177,20 +441,23 @@ function clusterStops(stops: RouteStop[], nearbyThreshold: number): Cluster[] {
  * placed directly underneath a neighbouring pin -- and the pin, being an HTML
  * element, always painted on top of it.
  *
- * Drawing the pin as a circle in the same layer makes it part of the
- * collision box, so a label is pushed to a free side of *every* nearby pin,
- * and never ends up beneath one.
+ * Drawing the pin as the symbol's own icon makes it part of the collision
+ * box, so a label is pushed to a free side of *every* nearby pin, and never
+ * ends up beneath one.
  */
 const StopMarkers = React.memo(function StopMarkers({
     clusters,
     activeName,
     showLabels,
     textFont,
+    shapes,
 }: {
     clusters: Cluster[];
     activeName?: string | null;
     showLabels: boolean;
     textFont: string[];
+    /** Route geometry, so a label can be steered off the line it sits on. */
+    shapes?: ShapeCollection | null;
 }) {
     const data = useMemo<FeatureCollection>(
         () => ({
@@ -204,80 +471,83 @@ const StopMarkers = React.memo(function StopMarkers({
                     lat: c.stop.stop_lat,
                     lon: c.stop.stop_lon,
                     active: activeName === c.name ? 1 : 0,
+                    axis: lineAxisAt(c.lon, c.lat, shapes),
                 },
                 geometry: { type: "Point", coordinates: [c.lon, c.lat] },
             })),
         }),
-        [clusters, activeName]
+        [clusters, activeName, shapes]
     );
 
     return (
         <Source id="route-stops" type="geojson" data={data}>
-            {/* Pin. Drawn first so the label layer can collide against it. */}
+            {/*
+              Pin and label are ONE symbol. The icon is always drawn
+              (`icon-allow-overlap`) while the text may be dropped, and because
+              both belong to the same symbol the icon's box is part of what the
+              label must avoid -- so a label is never placed under a pin, its
+              own or a neighbour's.
+            */}
             <Layer
                 id="route-stop-pin"
-                type="circle"
+                type="symbol"
+                layout={{
+                    "icon-image": [
+                        "case",
+                        ["==", ["get", "active"], 1],
+                        "stop-pin-active",
+                        "stop-pin",
+                    ],
+                    "icon-allow-overlap": true,
+                    "icon-ignore-placement": false,
+                    ...(showLabels
+                        ? {
+                              "text-field": ["get", "name"],
+                              "text-font": textFont,
+                              // Integer: a fractional size lands glyph edges
+                              // between texel centres, which costs sharpness
+                              // at these small sizes for no visual gain.
+                              "text-size": 12,
+                              "text-max-width": 8,
+                              // Anchors ordered per stop so the sides clear of
+                              // the route line are tried first. Supersedes
+                              // text-variable-anchor + text-radial-offset,
+                              // which cannot vary per feature. The active pin
+                              // is drawn larger (r7+2 vs r5+2), so it gets the
+                              // bigger radius to clear its own icon.
+                              "text-variable-anchor-offset": [
+                                  "case",
+                                  ["==", ["get", "active"], 1],
+                                  anchorOffsetExpression(1.1),
+                                  anchorOffsetExpression(0.9),
+                              ],
+                              "text-justify": "auto",
+                              "text-allow-overlap": false,
+                              "text-ignore-placement": false,
+                              // Without this MapLibre treats icon and text as
+                              // one placement unit (placement.ts: `placeIcon =
+                              // placeText = placeIcon && placeText`), so a
+                              // label that finds no free anchor takes its pin
+                              // down with it. We want the pin to always stay.
+                              "text-optional": true,
+                              // Lower sorts first, so the active stop wins.
+                              "symbol-sort-key": [
+                                  "-",
+                                  0,
+                                  ["to-number", ["get", "active"]],
+                              ],
+                          }
+                        : {}),
+                }}
                 paint={{
-                    "circle-radius": [
-                        "case",
-                        ["==", ["get", "active"], 1],
-                        7,
-                        4.5,
-                    ],
-                    "circle-color": [
-                        "case",
-                        ["==", ["get", "active"], 1],
-                        "#FFFFFF",
-                        "#0C1B2A",
-                    ],
-                    "circle-stroke-width": 2,
-                    "circle-stroke-color": [
-                        "case",
-                        ["==", ["get", "active"], 1],
-                        "#0C1B2A",
-                        "#FFFFFF",
-                    ],
+                    "text-color": "#0C1B2A",
+                    "text-halo-color": "#FFFFFF",
+                    // Collision cannot help against the route line -- line
+                    // layers contribute no boxes -- so the halo is the only
+                    // thing keeping a label legible where it crosses one.
+                    "text-halo-width": 2,
                 }}
             />
-            {showLabels && (
-                <Layer
-                    id="route-stop-label"
-                    type="symbol"
-                    layout={{
-                        "text-field": ["get", "name"],
-                        "text-font": textFont,
-                        "text-size": 11.5,
-                        "text-max-width": 8,
-                        // Try each position in turn until one is free.
-                        "text-variable-anchor": [
-                            "left",
-                            "right",
-                            "top",
-                            "bottom",
-                            "top-left",
-                            "top-right",
-                            "bottom-left",
-                            "bottom-right",
-                        ],
-                        // Clears the pin drawn above at every anchor.
-                        "text-radial-offset": 0.8,
-                        "text-justify": "auto",
-                        "text-allow-overlap": false,
-                        "text-ignore-placement": false,
-                        // Selected stop wins when labels compete for space.
-                        "symbol-sort-key": [
-                            "-",
-                            0,
-                            ["to-number", ["get", "active"]],
-                        ],
-                    }}
-                    paint={{
-                        "text-color": "#0C1B2A",
-                        "text-halo-color": "#FFFFFF",
-                        "text-halo-width": 1.6,
-                    }}
-                />
-            )}
         </Source>
     );
 });
@@ -310,18 +580,16 @@ const MainMapComponent = ({
 
     // `resolvedTheme` collapses "system" to the actual light/dark value.
     const { resolvedTheme } = useTheme();
-    const styleUrl = useMemo(
-        () => mapStyleFor(resolvedTheme === "dark"),
-        [resolvedTheme]
-    );
+    const isDark = resolvedTheme === "dark";
+    const styleUrl = useMemo(() => mapStyleFor(isDark), [isDark]);
 
     /**
      * The basemap style is fetched and its `glyphs` URL repointed at our own
      * SDF directory before handing it to MapLibre. A style carries exactly one
      * glyph endpoint for every symbol layer, so this is the only way to use
      * PT Sans without also self-hosting the basemap's own label fonts --
-     * hence `scripts/build-glyphs.mjs` bakes both PT Sans Narrow Bold (ours)
-     * and PT Sans Bold (the fallback the basemap layers resolve to).
+     * hence `scripts/build-glyphs.mjs` bakes PT Sans Narrow Bold (our stop
+     * labels), PT Sans Bold, and PT Sans Regular (basemap labels).
      */
     const [mapStyle, setMapStyle] = useState<string | StyleSpecification>(
         styleUrl
@@ -336,17 +604,47 @@ const MainMapComponent = ({
                 if (!res.ok) throw new Error(String(res.status));
                 const style = (await res.json()) as StyleSpecification;
 
-                // Basemap labels keep their own fonts, which our glyph
-                // directory does not have -- repoint them at a stack we do
-                // ship so they still render.
+                // Basemap labels are context, not content: the stop names
+                // are what the user is here to read. Two things were making
+                // them compete.
+                //
+                // 1. Weight. Every basemap label was being repointed at
+                //    PT Sans *Bold* -- heavier than the basemap's own Noto
+                //    Sans Regular -- so place names rendered bolder than the
+                //    style intended and read as foreground.
+                // 2. Contrast. Positron's place labels are near-black on a
+                //    near-white map, which is the strongest contrast on
+                //    screen; our stop labels could not out-rank them.
+                //
+                // So: Regular weight, and muted toward the background. Halos
+                // stay (they keep labels legible over busy geometry) but are
+                // softened to match.
+                const muted = isDark ? "#8A94A6" : "#9AA3B0";
+                const mutedHalo = isDark
+                    ? "rgba(12,27,42,0.75)"
+                    : "rgba(255,255,255,0.85)";
+
                 for (const layer of style.layers ?? []) {
                     const l = layer as {
+                        id?: string;
                         layout?: Record<string, unknown>;
+                        paint?: Record<string, unknown>;
                         type?: string;
                     };
-                    if (l.type === "symbol" && l.layout?.["text-font"]) {
-                        l.layout["text-font"] = ["PT Sans Bold"];
-                    }
+                    if (l.type !== "symbol" || !l.layout?.["text-font"]) continue;
+
+                    l.layout["text-font"] = ["PT Sans Regular"];
+
+                    // Shields carry their own icon-based styling; recolouring
+                    // their text would leave it unreadable on the shield.
+                    if (/shield/i.test(l.id ?? "")) continue;
+
+                    l.paint = {
+                        ...l.paint,
+                        "text-color": muted,
+                        "text-halo-color": mutedHalo,
+                        "text-halo-width": 1,
+                    };
                 }
 
                 if (!cancelled) {
@@ -362,7 +660,7 @@ const MainMapComponent = ({
         return () => {
             cancelled = true;
         };
-    }, [styleUrl]);
+    }, [styleUrl, isDark]);
 
     // Uncontrolled camera (initialViewState + no `onMove` write-back) so
     // fitBounds can animate freely. A controlled viewState would be re-applied
@@ -378,10 +676,59 @@ const MainMapComponent = ({
         });
     }, []);
 
+    /**
+     * Register the pin icons. Re-run on every style load: swapping the
+     * basemap (light/dark) replaces the style, and images do not survive it.
+     */
+    const addPinImages = useCallback(() => {
+        const map = mapRef.current?.getMap?.();
+        if (!map) return;
+
+        // Only add what is missing. `addImage`/`removeImage` themselves fire
+        // `styledata`, so unconditionally re-registering here recursed until
+        // the stack blew -- the page never finished loading.
+        for (const [id, spec] of Object.entries(PIN_IMAGES)) {
+            if (map.hasImage?.(id)) continue;
+            map.addImage(id, makeDotImage(spec), { pixelRatio: 2 });
+        }
+
+        if (!map.hasImage?.("line-blocker")) {
+            map.addImage("line-blocker", makeBlockerImage(), { pixelRatio: 2 });
+        }
+    }, []);
+
     // Clustering is O(n^2); keep it out of the render path on every pan.
     const routeClusters = useMemo(
         () => clusterStops(routeStops, nearbyThreshold),
         [routeStops, nearbyThreshold]
+    );
+
+    /**
+     * The lines labels must dodge: every drawn route, or the network overview
+     * when nothing is selected. Memoised because the axis lookup below walks
+     * these vertices once per stop.
+     */
+    const labelShapes = useMemo<ShapeCollection | null>(() => {
+        if (layers.length) {
+            return {
+                type: "FeatureCollection",
+                features: layers.flatMap((l) => l.geometry.features),
+            };
+        }
+        return overview ?? null;
+    }, [layers, overview]);
+
+    /**
+     * Collision footprint for those lines. Only built while stop labels are
+     * on screen -- below that zoom there is nothing to push around, and the
+     * point chain would be wasted work on every pan.
+     */
+    const blockers = useMemo(
+        () =>
+            zoomLevel >= labelThreshold && routeClusters.length > 0
+                ? blockerPoints(labelShapes, zoomLevel)
+                : { type: "FeatureCollection" as const, features: [] },
+        [labelShapes, zoomLevel, labelThreshold, routeClusters.length]
     );
 
     // Ask for the stop layer the first time it could actually be shown, so a
@@ -470,6 +817,8 @@ const MainMapComponent = ({
                 zoom: 10,
             }}
             onMove={handleMove}
+            onLoad={addPinImages}
+            onStyleData={addPinImages}
             // Fills whatever the parent allots. A hard 100vh would overflow the
             // mobile layout, where the map shares the screen with a bottom sheet.
             style={{ width: "100%", height: "100%" }}
@@ -547,24 +896,32 @@ const MainMapComponent = ({
             */}
             {allStops && zoomLevel >= allStopsZoom && (
                 <Source id="all-stops" type="geojson" data={allStops}>
+                    {/*
+                      Dot and label are one symbol here too, for the same
+                      reason as the route stops: a circle layer is invisible to
+                      the collision engine, so labels used to settle underneath
+                      neighbouring dots. The icon carries the collision box.
+                    */}
                     <Layer
                         id="all-stops-circle"
-                        type="circle"
-                        paint={{
-                            "circle-radius": [
+                        type="symbol"
+                        layout={{
+                            "icon-image": "all-stop-dot",
+                            "icon-allow-overlap": true,
+                            "icon-ignore-placement": false,
+                            // The source image is drawn at r3 (+1.5 stroke);
+                            // scale it to match the old interpolated radius.
+                            "icon-size": [
                                 "interpolate",
                                 ["linear"],
                                 ["zoom"],
                                 14,
-                                2.5,
+                                0.56,
                                 17,
-                                5,
+                                1.11,
                             ],
-                            "circle-color": "#0C1B2A",
-                            "circle-stroke-width": 1.5,
-                            "circle-stroke-color": "#FFFFFF",
-                            "circle-opacity": 0.9,
                         }}
+                        paint={{ "icon-opacity": 0.9 }}
                     />
                     <Layer
                         id="all-stops-label"
@@ -608,7 +965,38 @@ const MainMapComponent = ({
                     activeName={activeStop?.name ?? null}
                     showLabels={zoomLevel >= labelThreshold}
                     textFont={LABEL_FONT}
+                    shapes={labelShapes}
                 />
+            )}
+
+            {/*
+              Invisible collision footprint for the route line.
+
+              Declared AFTER the stop labels on purpose: MapLibre places
+              symbol layers in reverse style order (`pauseable_placement.ts`
+              walks `order.length - 1` down to 0), so a layer listed later
+              claims its collision space first. These blockers are therefore
+              already in the index when the labels look for a free anchor,
+              which is what makes "do not sit on the route" actually binding.
+
+              The icon is a 1x1 transparent pixel scaled by `icon-size`; only
+              the collision box matters, nothing is drawn.
+            */}
+            {blockers.features.length > 0 && (
+                <Source id="line-blockers" type="geojson" data={blockers}>
+                    <Layer
+                        id="line-blockers-sym"
+                        type="symbol"
+                        layout={{
+                            "icon-image": "line-blocker",
+                            "icon-size": 1,
+                            "icon-allow-overlap": true,
+                            "icon-ignore-placement": false,
+                            "icon-padding": 0,
+                        }}
+                        paint={{ "icon-opacity": 0 }}
+                    />
+                </Source>
             )}
         </MapGL>
     );
