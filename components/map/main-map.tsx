@@ -123,7 +123,12 @@ interface DotSpec {
 const PIN_IMAGES: Record<string, DotSpec> = {
     "stop-pin": { r: 5, stroke: 2, fill: "#0C1B2A", ring: "#FFFFFF" },
     "stop-pin-active": { r: 7, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
-    "all-stop-dot": { r: 3, stroke: 1.5, fill: "#0C1B2A", ring: "#FFFFFF" },
+    // Drawn at the size it has when `icon-size` is 1, then scaled per zoom.
+    "all-stop-dot": { r: 5, stroke: 2, fill: "#0C1B2A", ring: "#FFFFFF" },
+    // Hover: same geometry, inverted like the active route pin so the cursor
+    // target is unmistakable.
+    "all-stop-dot-hover": { r: 6, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
+    "stop-pin-hover": { r: 6, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
 };
 
 /**
@@ -453,12 +458,14 @@ function clusterStops(stops: RouteStop[], nearbyThreshold: number): Cluster[] {
 const StopMarkers = React.memo(function StopMarkers({
     clusters,
     activeName,
+    hoveredName,
     showLabels,
     textFont,
     shapes,
 }: {
     clusters: Cluster[];
     activeName?: string | null;
+    hoveredName?: string | null;
     showLabels: boolean;
     textFont: string[];
     /** Route geometry, so a label can be steered off the line it sits on. */
@@ -497,10 +504,14 @@ const StopMarkers = React.memo(function StopMarkers({
                 id="route-stop-pin"
                 type="symbol"
                 layout={{
+                    // Active wins over hover, so the selected stop keeps its
+                    // inverted look while the cursor passes over it.
                     "icon-image": [
                         "case",
                         ["==", ["get", "active"], 1],
                         "stop-pin-active",
+                        ["==", ["get", "name"], hoveredName ?? "\u0000"],
+                        "stop-pin-hover",
                         "stop-pin",
                     ],
                     "icon-allow-overlap": true,
@@ -583,6 +594,14 @@ const MainMapComponent = ({
     const allStopsZoom = 14;
 
     const mapRef = useRef<MapRef | null>(null);
+
+    /**
+     * Name of the all-stops dot under the cursor, or null.
+     *
+     * Tracked by name because that is what the layer's `icon-image` expression
+     * compares against -- the dot layer carries no stable per-feature id.
+     */
+    const [hoveredStop, setHoveredStop] = useState<string | null>(null);
 
     // `resolvedTheme` collapses "system" to the actual light/dark value.
     const { resolvedTheme } = useTheme();
@@ -913,7 +932,19 @@ const MainMapComponent = ({
                     );
                 }
             }}
-            cursor={"auto"}
+            onMouseMove={(e) => {
+                const f = e.features?.[0];
+                const id = f?.layer?.id;
+                const name =
+                    id === "all-stops-circle" || id === "route-stop-pin"
+                        ? String(f?.properties?.name ?? "")
+                        : null;
+                // Only re-render when the hovered stop actually changes;
+                // mousemove fires on every pointer pixel.
+                setHoveredStop((prev) => (prev === name ? prev : name));
+            }}
+            onMouseLeave={() => setHoveredStop(null)}
+            cursor={hoveredStop ? "pointer" : "auto"}
             initialViewState={{
                 latitude: -6.1907,
                 longitude: 106.8228,
@@ -1009,20 +1040,29 @@ const MainMapComponent = ({
                         id="all-stops-circle"
                         type="symbol"
                         layout={{
-                            "icon-image": "all-stop-dot",
+                            "icon-image": [
+                                "case",
+                                ["==", ["get", "name"], hoveredStop ?? "\u0000"],
+                                "all-stop-dot-hover",
+                                "all-stop-dot",
+                            ],
                             "icon-allow-overlap": true,
                             "icon-ignore-placement": false,
-                            // The source image is drawn at r3 (+1.5 stroke);
-                            // scale it to match the old interpolated radius.
+                            // Grows with zoom, but starts big enough to be a
+                            // real tap target: at the old 0.56 the dot was
+                            // 4.2px across, well under any usable hit area.
                             "icon-size": [
                                 "interpolate",
                                 ["linear"],
                                 ["zoom"],
                                 14,
-                                0.56,
+                                0.9,
                                 17,
-                                1.11,
+                                1.6,
                             ],
+                            // Keeps the hover swap from being dropped by the
+                            // collision index when dots are dense.
+                            "icon-padding": 0,
                         }}
                         paint={{ "icon-opacity": 0.9 }}
                     />
@@ -1066,6 +1106,7 @@ const MainMapComponent = ({
                 <StopMarkers
                     clusters={routeClusters}
                     activeName={activeStop?.name ?? null}
+                    hoveredName={hoveredStop}
                     showLabels={zoomLevel >= labelThreshold}
                     textFont={LABEL_FONT}
                     shapes={labelShapes}

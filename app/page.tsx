@@ -502,14 +502,29 @@ export default function Index() {
                           mode that rendered near-black text on a near-black
                           field. Pin it to the sidebar's own palette instead.
                         */}
-                        <Input
-                            placeholder="Cari rute atau halte"
-                            aria-label="Cari rute atau halte"
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            className="border-white/20 bg-white/10 text-white placeholder:text-white/50 focus-visible:ring-white/40 focus-visible:ring-offset-jakarta"
-                        />
-
+                        <div className="relative">
+                            <Input
+                                placeholder="Cari rute atau halte"
+                                aria-label="Cari rute atau halte"
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Escape") setSearchQuery("");
+                                }}
+                                className="border-white/20 bg-white/10 pr-9 text-white placeholder:text-white/50 focus-visible:ring-white/40 focus-visible:ring-offset-jakarta"
+                            />
+                            {searchQuery && (
+                                <button
+                                    type="button"
+                                    onClick={() => setSearchQuery("")}
+                                    aria-label="Hapus pencarian"
+                                    title="Hapus pencarian"
+                                    className="absolute top-1/2 right-1 -translate-y-1/2 rounded p-1.5 text-white/50 transition-colors hover:bg-white/10 hover:text-white"
+                                >
+                                    <X size={14} />
+                                </button>
+                            )}
+                        </div>
                     </div>
 
                     <div className="flex-1 overflow-y-auto pl-4 pr-4 pb-4">
