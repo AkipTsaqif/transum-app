@@ -591,7 +591,7 @@ const MainMapComponent = ({
     const labelThreshold = 11;
     const nearbyThreshold = 55;
     /** Below this, 6,437 pins would be an unreadable smear. */
-    const allStopsZoom = 14;
+    const allStopsZoom = 12;
 
     const mapRef = useRef<MapRef | null>(null);
 
@@ -1048,17 +1048,20 @@ const MainMapComponent = ({
                             ],
                             "icon-allow-overlap": true,
                             "icon-ignore-placement": false,
-                            // Grows with zoom, but starts big enough to be a
-                            // real tap target: at the old 0.56 the dot was
-                            // 4.2px across, well under any usable hit area.
+                            // Grows with zoom, anchored so the dot is already
+                            // a usable tap target at the zoom it first
+                            // appears: ~10px across at z12, ~20px at z17.
+                            // Extending the old 14->17 ramp backwards instead
+                            // would have put z12 at 5.2px, which is the
+                            // too-small-to-hit problem all over again.
                             "icon-size": [
                                 "interpolate",
                                 ["linear"],
                                 ["zoom"],
-                                14,
-                                0.9,
+                                12,
+                                0.85,
                                 17,
-                                1.6,
+                                1.7,
                             ],
                             // Keeps the hover swap from being dropped by the
                             // collision index when dots are dense.
@@ -1069,7 +1072,9 @@ const MainMapComponent = ({
                     <Layer
                         id="all-stops-label"
                         type="symbol"
-                        minzoom={15}
+                        // Same floor as the dot it belongs to: a one-level gap
+                        // meant dots appeared nameless for a whole zoom step.
+                        minzoom={12}
                         layout={{
                             "text-field": ["get", "name"],
                             "text-font": LABEL_FONT,
