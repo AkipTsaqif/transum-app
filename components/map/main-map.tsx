@@ -686,6 +686,63 @@ const MainMapComponent = ({
      * Register the pin icons. Re-run on every style load: swapping the
      * basemap (light/dark) replaces the style, and images do not survive it.
      */
+    /**
+     * Re-asserts our layers' stacking order.
+     *
+     * MapLibre paints `style.layers` in array order, and `addLayer` without a
+     * `beforeId` appends to the end. Selecting a different route unmounts the
+     * old `shape-<id>` source and mounts a new one, so the fresh line layer
+     * lands on top of `route-stop-pin` -- which is never recreated, because
+     * its own source is stable. The result was that stop pins painted above
+     * the route on first load and below it after any route change.
+     *
+     * `beforeId` on the <Layer> would be the declarative fix, but it throws
+     * when the referenced layer does not exist yet, and `route-stop-pin` is
+     * conditional on zoom and on having stops. So instead the order is
+     * restated here, after the fact, over whichever layers currently exist.
+     */
+    const enforceLayerOrder = useCallback(() => {
+        const map = mapRef.current?.getMap?.();
+        if (!map?.style) return;
+
+        let order: string[];
+        try {
+            order = map.getLayersOrder();
+        } catch {
+            return;
+        }
+
+        // Bottom to top. Route lines first, then stop graphics above them,
+        // and the invisible blockers last: symbol placement walks the array
+        // backwards, so being last is what gives them collision priority
+        // over the stop labels (see the layer's own comment).
+        const desired = [
+            ...order.filter((id) => id === "overview-line"),
+            ...order.filter((id) => id.startsWith("shape-line")),
+            ...order.filter((id) => id.startsWith("all-stops-")),
+            ...order.filter((id) => id === "route-stop-pin"),
+            ...order.filter((id) => id === "line-blockers-sym"),
+        ];
+        if (desired.length < 2) return;
+
+        // Already correct when our layers occupy the tail of the array in
+        // exactly this sequence. Checking first matters: `moveLayer` fires
+        // `styledata`, which calls back into here, so moving unconditionally
+        // would recurse until the stack blew.
+        const tail = order.slice(-desired.length);
+        if (tail.every((id, i) => id === desired[i])) return;
+
+        // Moving each to the top in turn leaves them stacked in this order.
+        for (const id of desired) {
+            try {
+                map.moveLayer(id);
+            } catch {
+                // A layer can disappear between the snapshot and this call
+                // (route switch mid-flight); the next pass will fix it.
+            }
+        }
+    }, []);
+
     const addPinImages = useCallback(() => {
         const map = mapRef.current?.getMap?.();
         if (!map) return;
@@ -702,6 +759,12 @@ const MainMapComponent = ({
             map.addImage("line-blocker", makeBlockerImage(), { pixelRatio: 2 });
         }
     }, []);
+
+    /** Both style-level fixups, for `onLoad` and `onStyleData`. */
+    const handleStyleReady = useCallback(() => {
+        addPinImages();
+        enforceLayerOrder();
+    }, [addPinImages, enforceLayerOrder]);
 
     // Clustering is O(n^2); keep it out of the render path on every pan.
     const routeClusters = useMemo(
@@ -742,6 +805,28 @@ const MainMapComponent = ({
     useEffect(() => {
         if (zoomLevel >= allStopsZoom) onNeedAllStops?.();
     }, [zoomLevel, allStopsZoom, onNeedAllStops]);
+
+    /**
+     * Restate the stacking order whenever the set of layers changes.
+     *
+     * `onStyleData` alone is not enough: react-map-gl adds a <Layer> during
+     * React's commit, which does not necessarily emit `styledata` before the
+     * next paint. The deps are exactly the things that mount or unmount one
+     * of our layers. Deferred a frame so every sibling <Layer> in the same
+     * commit has registered before the order is read.
+     */
+    useEffect(() => {
+        const t = requestAnimationFrame(enforceLayerOrder);
+        return () => cancelAnimationFrame(t);
+    }, [
+        enforceLayerOrder,
+        layers,
+        overview,
+        allStops,
+        zoomLevel,
+        routeClusters.length,
+        blockers.features.length,
+    ]);
 
     // Union of every drawn layer, so a multi-route stop view frames them all.
     const bounds = useMemo(() => {
@@ -835,8 +920,8 @@ const MainMapComponent = ({
                 zoom: 10,
             }}
             onMove={handleMove}
-            onLoad={addPinImages}
-            onStyleData={addPinImages}
+            onLoad={handleStyleReady}
+            onStyleData={handleStyleReady}
             // Fills whatever the parent allots. A hard 100vh would overflow the
             // mobile layout, where the map shares the screen with a bottom sheet.
             style={{ width: "100%", height: "100%" }}
