@@ -3,6 +3,7 @@
 import MapGL, {
     Layer,
     NavigationControl,
+    Popup,
     Source,
     type MapRef,
 } from "react-map-gl/maplibre";
@@ -168,6 +169,11 @@ interface MainMapComponentProps {
      * without reaching for the sidebar.
      */
     onBackgroundClick?: () => void;
+    /**
+     * Rendered inside a popup anchored to `activeStop`. Lets the page own the
+     * station card's content while the map owns its placement.
+     */
+    stopPopup?: React.ReactNode;
 }
 
 interface Cluster {
@@ -578,6 +584,7 @@ const MainMapComponent = ({
     onBackgroundClick,
     onStationClick,
     onNeedAllStops,
+    stopPopup,
 }: MainMapComponentProps) => {
     // Auto-fit frames a whole route at roughly z11-z13, so the old "> 12"
     // marker gate hid every stop the moment fitBounds finished. Pins are cheap
@@ -602,6 +609,9 @@ const MainMapComponent = ({
      * compares against -- the dot layer carries no stable per-feature id.
      */
     const [hoveredStop, setHoveredStop] = useState<string | null>(null);
+    // Incremented for every stop hit so even re-clicking the same stop asks
+    // the camera to focus it again.
+    const [stopFocusRequest, setStopFocusRequest] = useState(0);
 
     // `resolvedTheme` collapses "system" to the actual light/dark value.
     const { resolvedTheme } = useTheme();
@@ -865,6 +875,34 @@ const MainMapComponent = ({
         ) as LngLatBoundsLike;
     }, [layers]);
 
+    /**
+     * Centre a newly opened stop, zooming in only if we are further out than
+     * `stopFocusZoom`.
+     *
+     * Always jumping to a fixed zoom would pull the camera *backwards* for
+     * someone already examining the area at z17-18, so the zoom is only ever
+     * raised, never lowered. Keyed on the stop's coordinates so re-rendering
+     * the popup does not re-animate.
+     */
+    const stopFocusZoom = 16;
+    const focusKey = activeStop
+        ? `${activeStop.lat.toFixed(5)},${activeStop.lon.toFixed(5)}`
+        : null;
+
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !activeStop) return;
+
+        map.easeTo({
+            center: [activeStop.lon, activeStop.lat],
+            zoom: Math.max(map.getZoom(), stopFocusZoom),
+            duration: 600,
+            essential: true,
+        });
+        // activeStop is a fresh object each render; focusKey is the real input.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [focusKey, stopFocusRequest]);
+
     // Frame the selected route. Depends on `bounds` (not `geometry`) so
     // re-selecting a route with identical extent does not re-animate.
     useEffect(() => {
@@ -913,6 +951,7 @@ const MainMapComponent = ({
                 // resolve the station exactly as a marker click used to.
                 if (f.layer?.id === "route-stop-pin") {
                     const p = f.properties ?? {};
+                    setStopFocusRequest((n) => n + 1);
                     onStopClick?.({
                         stop_id: String(p.stop_id ?? ""),
                         stop_name: String(p.stop_name ?? p.name ?? ""),
@@ -925,6 +964,7 @@ const MainMapComponent = ({
 
                 if (f.layer?.id === "all-stops-circle") {
                     const [lon, lat] = (f.geometry as Point).coordinates;
+                    setStopFocusRequest((n) => n + 1);
                     onStationClick?.(
                         String(f.properties?.name ?? ""),
                         lat,
@@ -1149,6 +1189,27 @@ const MainMapComponent = ({
                         paint={{ "icon-opacity": 0 }}
                     />
                 </Source>
+            )}
+
+            {/*
+              Station card, anchored to the stop it describes. `anchor="bottom"`
+              puts the card above the point with MapLibre's own tip pointing
+              down at it, which is why the popup is used rather than a plain
+              absolutely-positioned div.
+            */}
+            {activeStop && stopPopup && (
+                <Popup
+                    longitude={activeStop.lon}
+                    latitude={activeStop.lat}
+                    anchor="bottom"
+                    offset={14}
+                    closeButton={false}
+                    closeOnClick={false}
+                    maxWidth="none"
+                    className="transum-stop-popup"
+                >
+                    {stopPopup}
+                </Popup>
             )}
         </MapGL>
     );

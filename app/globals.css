@@ -181,3 +181,27 @@
         @apply bg-background text-foreground;
     }
 }
+
+/*
+  MapLibre's popup ships its own white chrome: a padded white box plus a white
+  triangular tip drawn with borders. The station card supplies its own dark
+  surface, so the chrome is stripped and only the tip is recoloured to match.
+*/
+.transum-stop-popup .maplibregl-popup-content {
+    background: transparent;
+    padding: 0;
+    box-shadow: none;
+    border-radius: 0;
+}
+
+.transum-stop-popup.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.transum-stop-popup.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.transum-stop-popup.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+    border-top-color: hsl(var(--jakarta));
+}
+
+.transum-stop-popup.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.transum-stop-popup.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.transum-stop-popup.maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+    border-bottom-color: hsl(var(--jakarta));
+}

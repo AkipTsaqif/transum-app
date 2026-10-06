@@ -62,6 +62,9 @@ export default function Index() {
     const [stationLoading, setStationLoading] = useState(false);
     const [stationError, setStationError] = useState<string | null>(null);
     const [stationRoutes, setStationRoutes] = useState<RouteDetail[]>([]);
+    // True once "tampilkan rute" has been pressed: the sidebar panel and the
+    // drawn routes both follow from this, the popup alone does not.
+    const [stationExpanded, setStationExpanded] = useState(false);
 
     // Load the lightweight index once (~41 KB). Geometry is fetched per route.
     useEffect(() => {
@@ -161,6 +164,13 @@ export default function Index() {
      */
     const stationAbortRef = useRef<AbortController | null>(null);
 
+    /**
+     * Clicking a stop only resolves the station itself -- name, platforms and
+     * which routes call there. Drawing those routes is deferred to an explicit
+     * button, because a busy interchange serves up to 14 routes and fetching
+     * every geometry eagerly cost ~294 KB across 14 requests for what is
+     * usually just "what is this stop called?".
+     */
     const handleStopClick = useCallback(async (stop: RouteStop) => {
         stationAbortRef.current?.abort();
         const ctrl = new AbortController();
@@ -177,7 +187,8 @@ export default function Index() {
 
         setStationLoading(true);
         setStationError(null);
-        setSheetOpen(true);
+        setStationRoutes([]);
+        setStationExpanded(false);
 
         try {
             const res = await fetch(`/api/gtfs/stops/resolve?${query}`, {
@@ -188,11 +199,35 @@ export default function Index() {
             if (ctrl.signal.aborted) return;
 
             setStation(detail);
-            setSelectedRouteId(null);
+        } catch (err) {
+            if ((err as Error).name === "AbortError") return;
+            console.error("Failed to load stop:", err);
+            setStationError("Gagal memuat halte ini.");
+        } finally {
+            if (!ctrl.signal.aborted) setStationLoading(false);
+        }
+    }, []);
 
-            // Fetch each route's geometry in parallel.
+    /**
+     * "Tampilkan rute di peta": fetch every calling route's geometry, draw
+     * them, and open the detailed sidebar panel. This is the expensive half of
+     * the old stop-click behaviour, now behind a deliberate action.
+     */
+    const showStationRoutes = useCallback(async () => {
+        if (!station) return;
+
+        const ctrl = new AbortController();
+        stationAbortRef.current?.abort();
+        stationAbortRef.current = ctrl;
+
+        setStationExpanded(true);
+        setStationLoading(true);
+        setSelectedRouteId(null);
+        setSheetOpen(true);
+
+        try {
             const results = await Promise.all(
-                detail.routes.map(async (r) => {
+                station.routes.map(async (r) => {
                     const g = await fetch(
                         `/api/gtfs/routes/${encodeURIComponent(r.route_id)}`,
                         { signal: ctrl.signal }
@@ -205,12 +240,12 @@ export default function Index() {
             setStationRoutes(results.filter((r): r is RouteDetail => !!r));
         } catch (err) {
             if ((err as Error).name === "AbortError") return;
-            console.error("Failed to load stop:", err);
-            setStationError("Gagal memuat halte ini.");
+            console.error("Failed to load station routes:", err);
+            setStationError("Gagal memuat rute halte ini.");
         } finally {
             if (!ctrl.signal.aborted) setStationLoading(false);
         }
-    }, []);
+    }, [station]);
 
     /**
      * Fetched on demand: only a visitor who zooms in far enough pays for it.
@@ -259,6 +294,7 @@ export default function Index() {
         setStationRoutes([]);
         setStationError(null);
         setStationLoading(false);
+        setStationExpanded(false);
     }, []);
 
     /**
@@ -279,7 +315,7 @@ export default function Index() {
     // What the map draws: the station's routes when a stop is open, otherwise
     // the selected route -- either its trunk patterns or one chosen variant.
     const layers: DrawnLayer[] = useMemo(() => {
-        if (station) {
+        if (stationExpanded && station) {
             // Station view draws each route's trunk patterns only -- drawing
             // every diversion of every calling route would be unreadable.
             return stationRoutes.map((r) => {
@@ -363,11 +399,11 @@ export default function Index() {
                 geometry: { type: "FeatureCollection", features },
             },
         ];
-    }, [station, stationRoutes, detail, variantTripId]);
+    }, [stationExpanded, stationRoutes, detail, variantTripId]);
 
     // Stops shown as pins: every stop of every drawn route, de-duplicated.
     const visibleStops: RouteStop[] = useMemo(() => {
-        if (station) {
+        if (stationExpanded && station) {
             const seen = new Set<string>();
             const out: RouteStop[] = [];
             for (const r of stationRoutes) {
@@ -392,7 +428,7 @@ export default function Index() {
             if (only.length) return only;
         }
         return detail.stops;
-    }, [station, stationRoutes, detail, variantTripId]);
+    }, [stationExpanded, stationRoutes, detail, variantTripId]);
 
     // Stop-name search. Debounced so typing does not fire a request per key.
     useEffect(() => {
@@ -528,7 +564,7 @@ export default function Index() {
                     </div>
 
                     <div className="flex-1 overflow-y-auto pl-4 pr-4 pb-4">
-                        {station && (
+                        {stationExpanded && station && (
                             <StopPanel
                                 station={station}
                                 loading={stationLoading}
@@ -542,7 +578,7 @@ export default function Index() {
                         )}
 
                         {/* Matching stops, above the matching routes. */}
-                        {!station && stopHits.length > 0 && (
+                        {!stationExpanded && stopHits.length > 0 && (
                             <div className="-ml-4 -mr-4 mb-2">
                                 <div className="px-4 pb-1 text-xs font-bold tracking-wide text-white/40 uppercase">
                                     Halte
@@ -582,7 +618,7 @@ export default function Index() {
                             </div>
                         )}
 
-                        {!station && routesLoading && <RouteListSkeleton />}
+                        {!stationExpanded && routesLoading && <RouteListSkeleton />}
 
                         {routesError && (
                             <div className="text-sm text-red-200 bg-red-900/40 rounded p-3">
@@ -590,7 +626,7 @@ export default function Index() {
                             </div>
                         )}
 
-                        {!station &&
+                        {!stationExpanded &&
                             !routesLoading &&
                             !routesError &&
                             filteredRoutes.length === 0 &&
@@ -601,7 +637,7 @@ export default function Index() {
                                 </div>
                             )}
 
-                        {!station &&
+                        {!stationExpanded &&
                             !routesLoading &&
                             filteredRoutes.map((r) => {
                                 const isSelected = selectedRouteId === r.route_id;
@@ -671,7 +707,9 @@ export default function Index() {
             */}
             <div className="relative order-1 min-h-0 w-full min-w-0 flex-1 md:order-2 md:h-full">
                 {/* Floating over the map rather than in the sidebar: it is
-                    about the thing being drawn, so it belongs next to it. */}
+                    about the thing being drawn, so it belongs next to it.
+                    Hidden while a stop popup is open so the two cards never
+                    compete for the same corner. */}
                 {!station && detail && (
                     <VariantPanel
                         detail={detail}
@@ -688,6 +726,18 @@ export default function Index() {
                     allStops={allStops}
                     onStationClick={handleStationClick}
                     onNeedAllStops={loadAllStops}
+                    stopPopup={
+                        station ? (
+                            <StopPopupCard
+                                station={station}
+                                loading={stationLoading}
+                                error={stationError}
+                                expanded={stationExpanded}
+                                onShowRoutes={showStationRoutes}
+                                onClose={clearStation}
+                            />
+                        ) : null
+                    }
                     activeStop={
                         station
                             ? {
@@ -956,6 +1006,97 @@ function VariantPanel({
  * Replaces the route list while a stop is open: the station name and every
  * route calling there, each clickable to switch back to single-route view.
  */
+/**
+ * Compact station card shown in a popup anchored to the clicked stop.
+ *
+ * Deliberately shows only identity -- name, platforms, route badges -- and
+ * defers drawing the routes to an explicit button: a busy interchange serves
+ * up to 14 routes, and fetching every geometry on each click cost ~294 KB for
+ * what is usually just "what is this stop?".
+ */
+function StopPopupCard({
+    station,
+    loading,
+    error,
+    expanded,
+    onShowRoutes,
+    onClose,
+}: {
+    station: StationDetail;
+    loading: boolean;
+    error: string | null;
+    expanded: boolean;
+    onShowRoutes: () => void;
+    onClose: () => void;
+}) {
+    return (
+        <div className="w-56 overflow-hidden rounded-lg bg-jakarta text-white shadow-xl ring-1 ring-white/10">
+            <div className="flex items-start gap-2 px-3 pt-2.5 pb-2">
+                <MapPin size={13} className="mt-0.5 shrink-0 opacity-60" />
+                <div className="min-w-0 flex-1">
+                    <h2 className="text-sm leading-tight font-bold font-pt-sans">
+                        {station.name}
+                    </h2>
+                    <p className="mt-0.5 text-[11px] text-white/50">
+                        {station.routes.length} rute
+                        {station.platforms > 1 &&
+                            ` \u00b7 ${station.platforms} peron`}
+                    </p>
+                </div>
+                <button
+                    type="button"
+                    onClick={onClose}
+                    aria-label="Tutup"
+                    className="-mt-0.5 -mr-1 shrink-0 rounded p-1 text-white/50 transition-colors hover:bg-white/10 hover:text-white"
+                >
+                    <X size={13} />
+                </button>
+            </div>
+
+            {station.routes.length > 0 && (
+                <div className="flex flex-wrap gap-1 px-3 pb-2.5">
+                    {station.routes.map((r) => (
+                        <span
+                            key={r.route_id}
+                            title={r.route_long_name}
+                            className="rounded px-1.5 py-0.5 text-[10px] leading-none font-bold font-pt-sans-narrow"
+                            style={{
+                                backgroundColor: `#${r.route_color}`,
+                                color:
+                                    calculateLuminance(r.route_color) > 0.5
+                                        ? "black"
+                                        : "white",
+                            }}
+                        >
+                            {r.route_short_name}
+                        </span>
+                    ))}
+                </div>
+            )}
+
+            {error && (
+                <p className="mx-3 mb-2 rounded bg-red-900/40 p-2 text-[11px] text-red-200">
+                    {error}
+                </p>
+            )}
+
+            <button
+                type="button"
+                onClick={onShowRoutes}
+                disabled={loading || expanded || station.routes.length === 0}
+                className="flex w-full items-center justify-center gap-1.5 border-t border-white/10 px-3 py-2 text-[11px] font-bold transition-colors hover:bg-white/10 disabled:opacity-50 disabled:hover:bg-transparent"
+            >
+                <Route size={12} />
+                {loading
+                    ? "Memuat\u2026"
+                    : expanded
+                      ? "Rute ditampilkan"
+                      : "Tampilkan rute di peta"}
+            </button>
+        </div>
+    );
+}
+
 function StopPanel({
     station,
     loading,
