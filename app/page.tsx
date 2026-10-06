@@ -266,14 +266,6 @@ export default function Index() {
      * bounds memo returns null and the fitBounds effect early-returns, so the
      * map holds its current position and zoom.
      */
-    /**
-     * Whether the floating pattern card is on screen. It owns the "clear"
-     * affordance when visible, so the sidebar button defers to it -- and this
-     * must mirror VariantPanel's own bail-out (<2 variants renders nothing),
-     * or a single-pattern route would end up with no way to clear at all.
-     */
-    const showVariantPanel = !station && !!detail && (detail.variants?.length ?? 0) >= 2;
-
     const clearSelection = useCallback(() => {
         abortRef.current?.abort();
         clearStation();
@@ -518,28 +510,6 @@ export default function Index() {
                             className="border-white/20 bg-white/10 text-white placeholder:text-white/50 focus-visible:ring-white/40 focus-visible:ring-offset-jakarta"
                         />
 
-                        {/*
-                          Clearing never moves the camera: with no layers the
-                          bounds memo yields null and the fitBounds effect
-                          returns early, so the view stays exactly where the
-                          user left it.
-
-                          Hidden only when the floating route card is up,
-                          since that card carries its own clear button. The
-                          card is suppressed for single-pattern routes and
-                          while detail is still loading, so those keep this
-                          one -- as does station view.
-                        */}
-                        {(selectedRouteId || station) && !showVariantPanel && (
-                            <button
-                                type="button"
-                                onClick={clearSelection}
-                                className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-white/20 bg-white/5 px-3 py-1.5 text-xs text-white/80 transition-colors hover:bg-white/15 hover:text-white"
-                            >
-                                <X size={13} />
-                                Bersihkan pilihan
-                            </button>
-                        )}
                     </div>
 
                     <div className="flex-1 overflow-y-auto pl-4 pr-4 pb-4">
@@ -747,7 +717,10 @@ function VariantPanel({
     const [collapsed, setCollapsed] = useState(false);
 
     const variants = detail.variants ?? [];
-    if (variants.length < 2) return null;
+    // Rendered even for a single pattern (40 of 240 routes): the card carries
+    // the only clear-selection control, and the pattern list simply collapses
+    // to one row.
+    if (!variants.length) return null;
 
     const diversions = variants.filter((v) => v.kind === "alihan");
     const others = variants.filter(
