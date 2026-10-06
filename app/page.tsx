@@ -266,6 +266,14 @@ export default function Index() {
      * bounds memo returns null and the fitBounds effect early-returns, so the
      * map holds its current position and zoom.
      */
+    /**
+     * Whether the floating pattern card is on screen. It owns the "clear"
+     * affordance when visible, so the sidebar button defers to it -- and this
+     * must mirror VariantPanel's own bail-out (<2 variants renders nothing),
+     * or a single-pattern route would end up with no way to clear at all.
+     */
+    const showVariantPanel = !station && !!detail && (detail.variants?.length ?? 0) >= 2;
+
     const clearSelection = useCallback(() => {
         abortRef.current?.abort();
         clearStation();
@@ -515,8 +523,14 @@ export default function Index() {
                           bounds memo yields null and the fitBounds effect
                           returns early, so the view stays exactly where the
                           user left it.
+
+                          Hidden only when the floating route card is up,
+                          since that card carries its own clear button. The
+                          card is suppressed for single-pattern routes and
+                          while detail is still loading, so those keep this
+                          one -- as does station view.
                         */}
-                        {(selectedRouteId || station) && (
+                        {(selectedRouteId || station) && !showVariantPanel && (
                             <button
                                 type="button"
                                 onClick={clearSelection}
@@ -678,6 +692,7 @@ export default function Index() {
                         detail={detail}
                         selected={variantTripId}
                         onSelect={setVariantTripId}
+                        onClear={clearSelection}
                     />
                 )}
 
@@ -698,6 +713,11 @@ export default function Index() {
                             : null
                     }
                     onStopClick={handleStopClick}
+                    // Clicking empty map closes the open stop. Only the
+                    // station is cleared, not the route behind it, so the
+                    // user drops back to the route they were exploring
+                    // rather than to a blank map.
+                    onBackgroundClick={station ? clearStation : undefined}
                 />
             </div>
         </div>
@@ -715,10 +735,13 @@ function VariantPanel({
     detail,
     selected,
     onSelect,
+    onClear,
 }: {
     detail: RouteDetail;
     selected: string | null;
     onSelect: (tripId: string | null) => void;
+    /** Clears the whole route selection; rendered in this panel's header. */
+    onClear: () => void;
 }) {
     const [showOther, setShowOther] = useState(false);
     const [collapsed, setCollapsed] = useState(false);
@@ -777,12 +800,49 @@ function VariantPanel({
         : "Utama";
 
     return (
-        <div className="pointer-events-auto absolute top-3 left-3 z-20 w-60 overflow-hidden rounded-lg bg-jakarta/95 text-white shadow-xl ring-1 ring-white/10 backdrop-blur-sm">
+        <div className="pointer-events-auto absolute top-3 left-3 z-20 flex max-h-[calc(100%-1.5rem)] w-60 flex-col overflow-hidden rounded-lg bg-jakarta/95 text-white shadow-xl ring-1 ring-white/10 backdrop-blur-sm">
+            {/*
+              Which route this panel belongs to. Without it the card showed
+              only pattern names, so it was not obvious what was being
+              configured once the sidebar scrolled away from the selection.
+            */}
+            <div className="flex shrink-0 items-center gap-2 px-3 pt-3 pb-2">
+                <span
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold font-pt-sans-narrow"
+                    style={{
+                        backgroundColor: `#${detail.route_color}`,
+                        color:
+                            calculateLuminance(detail.route_color) > 0.5
+                                ? "black"
+                                : "white",
+                    }}
+                >
+                    {detail.route_short_name}
+                </span>
+                <span
+                    className="min-w-0 flex-1 text-xs leading-snug font-bold font-pt-sans"
+                    title={detail.route_long_name}
+                >
+                    {detail.route_long_name}
+                </span>
+                <button
+                    type="button"
+                    onClick={onClear}
+                    aria-label="Bersihkan pilihan"
+                    title="Bersihkan pilihan"
+                    className="-mr-1 shrink-0 cursor-pointer rounded p-1 text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+                >
+                    <X size={14} />
+                </button>
+            </div>
+
+            <div className="mx-3 shrink-0 border-t border-white/10" />
+
             <button
                 type="button"
                 onClick={() => setCollapsed((c) => !c)}
                 aria-expanded={!collapsed}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-white/5"
+                className="flex w-full shrink-0 items-center gap-2 px-3 py-2 text-left hover:bg-white/5"
             >
                 <Route size={13} className="shrink-0 opacity-60" />
                 <span className="min-w-0 flex-1">
@@ -804,7 +864,10 @@ function VariantPanel({
             </button>
 
             {!collapsed && (
-                <div className="max-h-[45vh] overflow-y-auto pb-1">
+                // min-h-0 lets this flex child actually shrink, so the list
+                // scrolls inside the card instead of pushing the footnote
+                // past the bottom edge.
+                <div className="min-h-0 flex-1 overflow-y-auto pb-1">
 
             {variants
                 .filter((v) => v.kind === "utama")
@@ -883,11 +946,19 @@ function VariantPanel({
                 </>
             )}
 
-                    <p className="px-3 pt-2 pb-1 text-[10px] leading-snug text-white/35">
-                        Hanya tampil bila dipilih. GTFS tidak mencatat
-                        pengalihan yang sedang berlaku.
-                    </p>
                 </div>
+            )}
+
+            {/*
+              Pinned outside the scroll area. It used to sit inside, so once
+              the variant list overflowed the card's max height the footnote
+              was pushed below the fold and clipped.
+            */}
+            {!collapsed && (
+                <p className="shrink-0 border-t border-white/10 px-3 pt-2 pb-2.5 text-[10px] leading-snug text-white/35">
+                    Hanya tampil bila dipilih. GTFS tidak mencatat pengalihan
+                    yang sedang berlaku.
+                </p>
             )}
         </div>
     );

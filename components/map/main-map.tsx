@@ -158,6 +158,11 @@ interface MainMapComponentProps {
     /** Pin for the currently selected station, if any. */
     activeStop?: { lat: number; lon: number; name: string } | null;
     onStopClick?: (stop: RouteStop) => void;
+    /**
+     * Clicking the map away from any stop. Used to dismiss the open station
+     * without reaching for the sidebar.
+     */
+    onBackgroundClick?: () => void;
 }
 
 interface Cluster {
@@ -559,6 +564,7 @@ const MainMapComponent = ({
     allStops,
     activeStop,
     onStopClick,
+    onBackgroundClick,
     onStationClick,
     onNeedAllStops,
 }: MainMapComponentProps) => {
@@ -785,7 +791,19 @@ const MainMapComponent = ({
             ]}
             onClick={(e) => {
                 const f = e.features?.[0];
-                if (!f) return;
+
+                // Nothing under the cursor: treat it as "dismiss".
+                //
+                // `e.features` is populated from `interactiveLayerIds` only,
+                // so an empty list means the click genuinely missed every
+                // stop. MapLibre also suppresses `click` once the pointer
+                // travels past `clickTolerance` (3px), so a drag-to-pan ends
+                // in `dragend` rather than here -- panning cannot dismiss the
+                // selection by accident.
+                if (!f) {
+                    onBackgroundClick?.();
+                    return;
+                }
 
                 // Route stops carry the original stop, so the panel can
                 // resolve the station exactly as a marker click used to.
