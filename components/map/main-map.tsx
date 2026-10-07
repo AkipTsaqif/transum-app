@@ -1192,17 +1192,18 @@ const MainMapComponent = ({
             )}
 
             {/*
-              Station card, anchored to the stop it describes. `anchor="bottom"`
-              puts the card above the point with MapLibre's own tip pointing
-              down at it, which is why the popup is used rather than a plain
-              absolutely-positioned div.
+              Station card, anchored to the stop it describes. Anchor is left
+              unset deliberately: MapLibre measures the popup and flips it to
+              top/bottom/left/right/corners as needed, keeping the entire card
+              inside the viewport while its own tip still points at the stop.
+              `padding` reserves a little breathing room from every map edge.
             */}
             {activeStop && stopPopup && (
                 <Popup
                     longitude={activeStop.lon}
                     latitude={activeStop.lat}
-                    anchor="bottom"
                     offset={14}
+                    padding={{ top: 12, right: 12, bottom: 12, left: 12 }}
                     closeButton={false}
                     closeOnClick={false}
                     maxWidth="none"
