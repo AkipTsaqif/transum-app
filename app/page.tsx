@@ -247,6 +247,8 @@ export default function Index() {
         }
     }, [station]);
 
+    const showAllStops = !selectedRouteId && !station;
+
     /**
      * Fetched on demand: only a visitor who zooms in far enough pays for it.
      * The ref guards against the map firing this on every zoom change.
@@ -401,24 +403,29 @@ export default function Index() {
         ];
     }, [stationExpanded, stationRoutes, detail, variantTripId]);
 
-    // Stops shown as pins: every stop of every drawn route, de-duplicated.
+    // Stops shown as pins.
     const visibleStops: RouteStop[] = useMemo(() => {
-        if (stationExpanded && station) {
-            const seen = new Set<string>();
-            const out: RouteStop[] = [];
-            for (const r of stationRoutes) {
-                for (const s of r.stops) {
-                    if (seen.has(s.stop_id)) continue;
-                    seen.add(s.stop_id);
-                    out.push(s);
-                }
-            }
-            return out;
+        // A selected stop is the sole point of interest. This also replaces
+        // the city-wide dot with the larger active route-stop pin, regardless
+        // of whether the stop was opened from a route, search, or all-stops
+        // layer. Loading its calling routes must not repopulate every stop on
+        // those routes -- the selected station remains the only pin.
+        if (station) {
+            return [
+                {
+                    stop_id: station.id,
+                    stop_name: station.name,
+                    stop_lat: station.lat,
+                    stop_lon: station.lon,
+                    sequence: 0,
+                },
+            ];
         }
         if (!detail) return [];
 
-        // Limit pins to the pattern actually drawn, so a diversion does not
-        // show stops it never calls at.
+        // A selected route keeps only the stops belonging to the pattern that
+        // is actually drawn, so a diversion does not show stops it never
+        // calls at. The separate city-wide all-stops layer is hidden below.
         const v = variantTripId
             ? detail.variants.find((x) => x.trip_id === variantTripId)
             : null;
@@ -428,7 +435,7 @@ export default function Index() {
             if (only.length) return only;
         }
         return detail.stops;
-    }, [stationExpanded, stationRoutes, detail, variantTripId]);
+    }, [station, detail, variantTripId]);
 
     // Stop-name search. Debounced so typing does not fire a request per key.
     useEffect(() => {
@@ -724,6 +731,7 @@ export default function Index() {
                     routeStops={visibleStops}
                     overview={overview}
                     allStops={allStops}
+                    showAllStops={showAllStops}
                     onStationClick={handleStationClick}
                     onNeedAllStops={loadAllStops}
                     stopPopup={
