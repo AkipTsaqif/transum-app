@@ -405,21 +405,43 @@ export default function Index() {
 
     // Stops shown as pins.
     const visibleStops: RouteStop[] = useMemo(() => {
-        // A selected stop is the sole point of interest. This also replaces
-        // the city-wide dot with the larger active route-stop pin, regardless
-        // of whether the stop was opened from a route, search, or all-stops
-        // layer. Loading its calling routes must not repopulate every stop on
-        // those routes -- the selected station remains the only pin.
+        // A selected stop is the point of interest, and replaces the city-wide
+        // dot with the larger active route-stop pin however it was opened
+        // (route, search, or all-stops layer).
         if (station) {
-            return [
-                {
-                    stop_id: station.id,
-                    stop_name: station.name,
-                    stop_lat: station.lat,
-                    stop_lon: station.lon,
-                    sequence: 0,
-                },
-            ];
+            const selected: RouteStop = {
+                stop_id: station.id,
+                stop_name: station.name,
+                stop_lat: station.lat,
+                stop_lon: station.lon,
+                sequence: 0,
+            };
+            // Before "Tampilkan rute di peta" only the selected stop is shown.
+            if (!stationExpanded) return [selected];
+
+            // After it, add the stops of each drawn route -- and only those.
+            // The lines are the trunk patterns, so the pins use the same
+            // patterns' stops rather than every stop a diversion might add.
+            // The selected stop goes first so it stays the cluster's
+            // representative; clusterStops then folds the platforms and the
+            // stops shared between routes into one pin each.
+            const seen = new Set<string>([selected.stop_id]);
+            const out: RouteStop[] = [selected];
+            for (const r of stationRoutes) {
+                const trunk = (r.variants ?? []).filter(
+                    (v) => v.kind === "utama"
+                );
+                const allow = trunk.length
+                    ? new Set(trunk.flatMap((v) => v.stopIds))
+                    : null;
+                for (const s of r.stops) {
+                    if (allow && !allow.has(s.stop_id)) continue;
+                    if (seen.has(s.stop_id)) continue;
+                    seen.add(s.stop_id);
+                    out.push(s);
+                }
+            }
+            return out;
         }
         if (!detail) return [];
 
@@ -435,7 +457,7 @@ export default function Index() {
             if (only.length) return only;
         }
         return detail.stops;
-    }, [station, detail, variantTripId]);
+    }, [station, stationExpanded, stationRoutes, detail, variantTripId]);
 
     // Stop-name search. Debounced so typing does not fire a request per key.
     useEffect(() => {
