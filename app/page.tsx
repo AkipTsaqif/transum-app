@@ -14,7 +14,11 @@ import {
     SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { calculateLuminance, removeOppStopPrefix } from "@/utils/helper-fn";
+import {
+    calculateLuminance,
+    removeOppStopPrefix,
+    routeTerminals,
+} from "@/utils/helper-fn";
 import type {
     RouteDetail,
     RouteStop,
@@ -44,6 +48,13 @@ export default function Index() {
 
     // Mobile bottom-sheet height. Ignored at md+ where the sidebar is a column.
     const [sheetOpen, setSheetOpen] = useState(false);
+
+    // Route under the pointer in the sidebar list. Drawn as a preview only --
+    // it never feeds `layers`, so the map's fitBounds is not triggered.
+    const [hoverRouteId, setHoverRouteId] = useState<string | null>(null);
+    const [hoverDetail, setHoverDetail] = useState<RouteDetail | null>(null);
+    // Routes already fetched for a preview, so re-hovering is instant.
+    const hoverCache = useRef(new Map<string, RouteDetail>());
 
     // Stop view: the clicked station, plus every route that calls there.
     // Faint city-wide network, shown only when nothing is selected.
@@ -115,6 +126,42 @@ export default function Index() {
             cancelled = true;
         };
     }, []);
+
+    // Fetch the hovered route's geometry. The delay keeps a quick sweep down
+    // the list from firing a request per row; only a pointer that rests on a
+    // row loads it. Cached for the session after the first load.
+    useEffect(() => {
+        if (!hoverRouteId) {
+            setHoverDetail(null);
+            return;
+        }
+        const cached = hoverCache.current.get(hoverRouteId);
+        if (cached) {
+            setHoverDetail(cached);
+            return;
+        }
+
+        const ctrl = new AbortController();
+        const timer = setTimeout(async () => {
+            try {
+                const res = await fetch(
+                    `/api/gtfs/routes/${encodeURIComponent(hoverRouteId)}`,
+                    { signal: ctrl.signal }
+                );
+                if (!res.ok) return;
+                const data: RouteDetail = await res.json();
+                hoverCache.current.set(hoverRouteId, data);
+                if (!ctrl.signal.aborted) setHoverDetail(data);
+            } catch {
+                // Aborted or offline: a preview is optional, so stay silent.
+            }
+        }, 120);
+
+        return () => {
+            clearTimeout(timer);
+            ctrl.abort();
+        };
+    }, [hoverRouteId]);
 
     // Fetch one route's geometry + stops on selection (~27 KB).
     // An AbortController keeps fast clicking from racing stale responses in.
@@ -403,6 +450,41 @@ export default function Index() {
         ];
     }, [stationExpanded, stationRoutes, detail, variantTripId]);
 
+    // The hovered route's trunk line. Line only (no pins), and deliberately
+    // separate from `layers`: the map frames `layers` and nothing else, so a
+    // preview never moves the camera. Hidden once the route is actually
+    // selected and loaded -- the real layer takes over without a gap.
+    const previewLayer: DrawnLayer | null = useMemo(() => {
+        if (stationExpanded) return null;
+        if (!hoverDetail || hoverDetail.route_id !== hoverRouteId) return null;
+        if (detail?.route_id === hoverDetail.route_id) return null;
+
+        const trunk = (hoverDetail.variants ?? []).filter(
+            (v) => v.kind === "utama"
+        );
+        // One direction only, as for a selected route: both follow the same
+        // corridor and drawing both z-fights.
+        const shapeIds = trunk.length
+            ? [trunk[0].shape_id]
+            : Object.keys(hoverDetail.geometryByShape ?? {});
+
+        const features = shapeIds
+            .map((s) => hoverDetail.geometryByShape?.[s])
+            .filter((c): c is [number, number][] => Boolean(c?.length))
+            .map((coordinates) => ({
+                type: "Feature" as const,
+                properties: { shape_id: "" },
+                geometry: { type: "LineString" as const, coordinates },
+            }));
+        if (!features.length) return null;
+
+        return {
+            id: hoverDetail.route_id,
+            color: hoverDetail.route_color,
+            geometry: { type: "FeatureCollection", features },
+        };
+    }, [stationExpanded, hoverDetail, hoverRouteId, detail]);
+
     // Stops shown as pins.
     const visibleStops: RouteStop[] = useMemo(() => {
         // A selected stop is the point of interest, and replaces the city-wide
@@ -458,6 +540,48 @@ export default function Index() {
         }
         return detail.stops;
     }, [station, stationExpanded, stationRoutes, detail, variantTripId]);
+
+    // The two terminals of the previewed route: first and last stop of the
+    // line being drawn. Intermediates are left out on purpose -- the preview
+    // answers "where does this go?", not "where does it stop?".
+    const previewEnds: RouteStop[] = useMemo(() => {
+        if (!previewLayer || !hoverDetail) return [];
+
+        const trunk = (hoverDetail.variants ?? []).find(
+            (v) => v.kind === "utama"
+        );
+        const byId = new Map(hoverDetail.stops.map((s) => [s.stop_id, s]));
+
+        // The stops in the order the drawn line visits them. A loop returns to
+        // where it began, so first/last alone would give one pin for a route
+        // with two ends; routeTerminals uses the long name to find the far one.
+        const ordered: RouteStop[] = trunk?.stopIds.length
+            ? trunk.stopIds
+                  .map((id) => byId.get(id))
+                  .filter((s): s is RouteStop => !!s)
+            : [...hoverDetail.stops].sort((x, y) => x.sequence - y.sequence);
+        const ends: (RouteStop | undefined)[] = routeTerminals(
+            hoverDetail.route_long_name,
+            ordered
+        );
+
+        const seen = new Set<string>();
+        return ends.filter((s): s is RouteStop => {
+            if (!s || seen.has(s.stop_id)) return false;
+            seen.add(s.stop_id);
+            return true;
+        });
+    }, [previewLayer, hoverDetail]);
+
+    // What the map pins: the open route/stop, plus the previewed terminals.
+    const pinStops: RouteStop[] = useMemo(() => {
+        if (station || !previewEnds.length) return visibleStops;
+        const have = new Set(visibleStops.map((s) => s.stop_id));
+        return [
+            ...visibleStops,
+            ...previewEnds.filter((s) => !have.has(s.stop_id)),
+        ];
+    }, [station, visibleStops, previewEnds]);
 
     // Stop-name search. Debounced so typing does not fire a request per key.
     useEffect(() => {
@@ -675,6 +799,16 @@ export default function Index() {
                                         key={r.route_id}
                                         type="button"
                                         aria-pressed={isSelected}
+                                        // Mouse only: on touch, the emulated
+                                        // hover would flash a preview right
+                                        // before the tap selects the route.
+                                        onPointerEnter={(e) => {
+                                            if (e.pointerType === "mouse")
+                                                setHoverRouteId(r.route_id);
+                                        }}
+                                        onPointerLeave={() =>
+                                            setHoverRouteId(null)
+                                        }
                                         className={`-ml-4 -mr-4 flex w-[calc(100%+2rem)] cursor-pointer items-center gap-2 p-2 pl-4 pr-4 text-left text-white transition-colors ${
                                             isSelected
                                                 ? "bg-jakarta-selected hover:brightness-110"
@@ -750,7 +884,13 @@ export default function Index() {
 
                 <MainMapComponent
                     layers={layers}
-                    routeStops={visibleStops}
+                    previewLayer={previewLayer}
+                    // Keyed on the hover itself, not on the loaded preview:
+                    // the route takes a moment to arrive and the network
+                    // must already be gone, or it flashes back in between.
+                    hideOverview={!!hoverRouteId && !stationExpanded}
+                    forcePins={previewEnds.length > 0}
+                    routeStops={pinStops}
                     overview={overview}
                     allStops={allStops}
                     showAllStops={showAllStops}

@@ -164,6 +164,23 @@ export interface DrawnLayer {
 interface MainMapComponentProps {
     /** One entry per route to draw. Multiple when a stop is selected. */
     layers: DrawnLayer[];
+    /**
+     * A route shown tentatively (sidebar hover). Drawn but never framed:
+     * `bounds` is derived from `layers` alone, so this cannot move the camera.
+     */
+    previewLayer?: DrawnLayer | null;
+    /**
+     * Hide the faint network. Separate from `previewLayer` because the preview
+     * only exists once its route has loaded, while the network should vanish
+     * the instant the hover starts.
+     */
+    hideOverview?: boolean;
+    /**
+     * Show the route pins, and their names, even below the usual zoom gates.
+     * The hover preview's terminals must be readable from the default
+     * overview zoom (10), which both gates treat as "too far out".
+     */
+    forcePins?: boolean;
     routeStops: RouteStop[];
     /** Every route, faint, shown only when nothing is selected. */
     overview?: ShapeCollection | null;
@@ -531,6 +548,9 @@ const StopMarkers = React.memo(function StopMarkers({
 
 const MainMapComponent = ({
     layers,
+    previewLayer = null,
+    hideOverview = false,
+    forcePins = false,
     routeStops,
     overview,
     allStops,
@@ -671,14 +691,15 @@ const MainMapComponent = ({
      * walks these vertices once per stop.
      */
     const labelShapes = useMemo<ShapeCollection | null>(() => {
-        if (layers.length) {
+        const drawn = previewLayer ? [...layers, previewLayer] : layers;
+        if (drawn.length) {
             return {
                 type: "FeatureCollection",
-                features: layers.flatMap((l) => l.geometry.features),
+                features: drawn.flatMap((l) => l.geometry.features),
             };
         }
         return null;
-    }, [layers]);
+    }, [layers, previewLayer]);
 
     // Ask for the stop layer the first time it could actually be shown, so a
     // visitor who never zooms in never downloads it.
@@ -703,6 +724,7 @@ const MainMapComponent = ({
     }, [
         enforceLayerOrder,
         layers,
+        previewLayer,
         overview,
         allStops,
         routeClusters.length,
@@ -862,7 +884,19 @@ const MainMapComponent = ({
                     <Layer
                         id="overview-line"
                         type="line"
-                        layout={{ "line-join": "round", "line-cap": "round" }}
+                        layout={{
+                            "line-join": "round",
+                            "line-cap": "round",
+                            // Hidden, not unmounted, while a sidebar hover
+                            // preview is drawn: the other 700 routes would
+                            // otherwise run under it and mask it. Toggling
+                            // visibility is free; remounting the source on
+                            // every hover would re-upload the whole network.
+                            visibility:
+                                hideOverview || previewLayer
+                                    ? "none"
+                                    : "visible",
+                        }}
                         paint={{
                             // Colour travels in the feature, so all 700 lines
                             // stay a single draw call.
@@ -913,6 +947,29 @@ const MainMapComponent = ({
                         />
                     </Source>
                 ))
+            )}
+
+            {/*
+              Hover preview. Named `shape-line-*` so enforceLayerOrder keeps it
+              with the other route lines, under the stop graphics.
+            */}
+            {previewLayer && (
+                <Source
+                    id="shape-preview"
+                    type="geojson"
+                    data={previewLayer.geometry}
+                >
+                    <Layer
+                        id="shape-line-preview"
+                        type="line"
+                        layout={{ "line-join": "round", "line-cap": "round" }}
+                        paint={{
+                            "line-color": `#${previewLayer.color}`,
+                            "line-width": 3,
+                            "line-opacity": 1,
+                        }}
+                    />
+                </Source>
             )}
 
             {/*
@@ -1013,12 +1070,12 @@ const MainMapComponent = ({
                 </Source>
             )}
 
-            {zoomLevel > zoomThreshold && routeClusters.length > 0 && (
+            {(forcePins || zoomLevel > zoomThreshold) && routeClusters.length > 0 && (
                 <StopMarkers
                     clusters={routeClusters}
                     activeName={activeStop?.name ?? null}
                     hoveredName={hoveredStop}
-                    showLabels={zoomLevel >= labelThreshold}
+                    showLabels={forcePins || zoomLevel >= labelThreshold}
                     textFont={LABEL_FONT}
                     shapes={labelShapes}
                 />
