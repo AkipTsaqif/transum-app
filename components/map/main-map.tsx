@@ -75,6 +75,29 @@ const GLYPHS_URL = "/glyphs/{fontstack}/{range}.pbf";
 const LABEL_FONT = ["PT Sans Narrow Bold"];
 
 /**
+ * Credit for the transit data, shown alongside the basemap's own credits in
+ * MapLibre's attribution control.
+ *
+ * Every route, stop and timetable comes from Transjakarta's official GTFS
+ * Static feed, which PT Transportasi Jakarta publishes under CC BY 4.0 (see
+ * https://ppid.transjakarta.co.id/informasi/berkala). The licence requires
+ * credit, a link to the licence, and an indication of changes -- hence
+ * "diolah": stops are merged into stations and trips are classified into
+ * patterns here, neither of which is in the original feed.
+ *
+ * The basemap credits (OpenFreeMap, OpenMapTiles, OpenStreetMap) are added
+ * automatically from the tile source, so they are not repeated here.
+ *
+ * Module-level on purpose: react-map-gl only reads `attributionControl` when
+ * the map is constructed, so the value must be stable.
+ */
+const ATTRIBUTION_CONTROL = {
+    customAttribution:
+        'Data rute \u00a9 <a href="https://ppid.transjakarta.co.id/informasi/berkala" target="_blank" rel="noopener noreferrer">PT Transportasi Jakarta</a>, ' +
+        '<a href="https://creativecommons.org/licenses/by/4.0/deed.id" target="_blank" rel="noopener noreferrer">CC BY 4.0</a> \u00b7 diolah',
+};
+
+/**
  * Pin images, registered with the map so the stop marker can be an *icon of
  * the symbol layer* rather than a separate circle layer.
  *
@@ -825,6 +848,7 @@ const MainMapComponent = ({
             // mobile layout, where the map shares the screen with a bottom sheet.
             style={{ width: "100%", height: "100%" }}
             mapStyle={styleUrl}
+            attributionControl={ATTRIBUTION_CONTROL}
         >
             <NavigationControl position="bottom-right" />
 
