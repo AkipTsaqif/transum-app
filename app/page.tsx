@@ -30,7 +30,6 @@ import type {
 import type { FeatureCollection } from "geojson";
 import { DualLine, SingleLine } from "@/components/route/route-line-diagram";
 import { dualDiagramFor, singleDiagramFor } from "@/utils/line-diagram";
-import { trunkLines } from "@/utils/trunk-lines";
 
 import { ArrowLeft, ChevronRight, MapPin, Route, X } from "lucide-react";
 import Link from "next/link";
@@ -419,14 +418,16 @@ export default function Index() {
     // the selected route -- either its trunk patterns or one chosen variant.
     const layers: DrawnLayer[] = useMemo(() => {
         if (stationExpanded && station) {
-            // Station view draws each route's trunk patterns only -- drawing
-            // every diversion of every calling route would be unreadable.
-            // `trunkLines` keeps the two directions from being drawn on top
-            // of each other where they share a street (which looked dashed).
+            // Station view draws all trunk directions for each calling route,
+            // but not its diversions. This is the unfiltered comparison with
+            // the non-overlapping option saved in commit 46a9647.
             return stationRoutes.map((r) => {
-                const trunk = trunkLines(r);
-                const use: [number, number][][] = trunk.length
-                    ? trunk
+                const trunks = (r.variants ?? [])
+                    .filter((v) => v.kind === "utama")
+                    .map((v) => r.geometryByShape?.[v.shape_id])
+                    .filter((c): c is [number, number][] => Boolean(c?.length));
+                const use: [number, number][][] = trunks.length
+                    ? trunks
                     : Object.values(r.geometryByShape ?? {}).filter(
                           (c): c is [number, number][] => Boolean(c?.length)
                       );
@@ -453,18 +454,16 @@ export default function Index() {
 
         const lineFor = (shapeId: string) => detail.geometryByShape?.[shapeId];
 
-        // A chosen pattern is drawn as-is. With nothing chosen, draw the trunk
-        // patterns -- but not naively: where both directions share a street,
-        // drawing both could make the line look uneven as their slightly
-        // offset geometries overlap. Drawing only the first dropped the return trip
-        // wherever it takes different streets. `trunkLines` draws the first
-        // trunk whole and adds only the stretches of the others that leave it.
-        const lines: [number, number][][] = variantTripId
-            ? detail.variants
-                  .filter((v) => v.trip_id === variantTripId)
-                  .map((v) => lineFor(v.shape_id))
-                  .filter((c): c is [number, number][] => Boolean(c?.length))
-            : trunkLines(detail);
+        // Option 4 for comparison: draw each trunk direction's complete GTFS
+        // shape. A chosen pattern still draws only its own shape. The lines
+        // may overlap where directions share a street; option 1, which removes
+        // shared stretches, is saved in commit 46a9647 for easy restoration.
+        const lines: [number, number][][] = detail.variants
+            .filter((v) =>
+                variantTripId ? v.trip_id === variantTripId : v.kind === "utama"
+            )
+            .map((v) => lineFor(v.shape_id))
+            .filter((c): c is [number, number][] => Boolean(c?.length));
 
         const features = lines
             .map((coordinates) => ({
@@ -511,11 +510,13 @@ export default function Index() {
         if (!hoverDetail || hoverDetail.route_id !== hoverRouteId) return null;
         if (detail?.route_id === hoverDetail.route_id) return null;
 
-        // The same lines a selected route would draw, so the preview does not
-        // jump when the route is clicked and the real layer takes over.
-        const trunk = trunkLines(hoverDetail);
-        const lines: [number, number][][] = trunk.length
-            ? trunk
+        // Match the selected-route map: preview every complete trunk shape.
+        const trunks = (hoverDetail.variants ?? [])
+            .filter((v) => v.kind === "utama")
+            .map((v) => hoverDetail.geometryByShape?.[v.shape_id])
+            .filter((c): c is [number, number][] => Boolean(c?.length));
+        const lines: [number, number][][] = trunks.length
+            ? trunks
             : Object.values(hoverDetail.geometryByShape ?? {}).filter(
                   (c): c is [number, number][] => Boolean(c?.length)
               );
