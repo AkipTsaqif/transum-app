@@ -30,6 +30,7 @@ import type {
 import type { FeatureCollection } from "geojson";
 import { DualLine, SingleLine } from "@/components/route/route-line-diagram";
 import { dualDiagramFor, singleDiagramFor } from "@/utils/line-diagram";
+import { trunkLines } from "@/utils/trunk-lines";
 
 import { ArrowLeft, ChevronRight, MapPin, Route, X } from "lucide-react";
 import Link from "next/link";
@@ -420,13 +421,15 @@ export default function Index() {
         if (stationExpanded && station) {
             // Station view draws each route's trunk patterns only -- drawing
             // every diversion of every calling route would be unreadable.
+            // `trunkLines` keeps the two directions from being drawn on top
+            // of each other where they share a street (which looked dashed).
             return stationRoutes.map((r) => {
-                const trunkShapes = (r.variants ?? [])
-                    .filter((v) => v.kind === "utama")
-                    .map((v) => v.shape_id);
-                const use = trunkShapes.length
-                    ? trunkShapes
-                    : Object.keys(r.geometryByShape ?? {});
+                const trunk = trunkLines(r);
+                const use: [number, number][][] = trunk.length
+                    ? trunk
+                    : Object.values(r.geometryByShape ?? {}).filter(
+                          (c): c is [number, number][] => Boolean(c?.length)
+                      );
 
                 return {
                     id: r.route_id,
@@ -434,10 +437,6 @@ export default function Index() {
                     geometry: {
                         type: "FeatureCollection" as const,
                         features: use
-                            .map((s) => r.geometryByShape?.[s])
-                            .filter((c): c is [number, number][] =>
-                                Boolean(c?.length)
-                            )
                             .map((coordinates) => ({
                                 type: "Feature" as const,
                                 properties: { shape_id: "" },
@@ -454,20 +453,20 @@ export default function Index() {
 
         const lineFor = (shapeId: string) => detail.geometryByShape?.[shapeId];
 
-        const chosen = variantTripId
-            ? detail.variants.filter((v) => v.trip_id === variantTripId)
-            : detail.variants.filter((v) => v.kind === "utama");
+        // A chosen pattern is drawn as-is. With nothing chosen, draw the trunk
+        // patterns -- but not naively: where both directions share a street,
+        // drawing both could make the line look uneven as their slightly
+        // offset geometries overlap. Drawing only the first dropped the return trip
+        // wherever it takes different streets. `trunkLines` draws the first
+        // trunk whole and adds only the stretches of the others that leave it.
+        const lines: [number, number][][] = variantTripId
+            ? detail.variants
+                  .filter((v) => v.trip_id === variantTripId)
+                  .map((v) => lineFor(v.shape_id))
+                  .filter((c): c is [number, number][] => Boolean(c?.length))
+            : trunkLines(detail);
 
-        // Both trunk directions follow the same corridor a few metres apart.
-        // Drawing both produced a dashed look where the two lines alternately
-        // won the depth test, so when nothing specific is selected draw one
-        // direction only -- the corridor is identical either way.
-        const toDraw =
-            !variantTripId && chosen.length > 1 ? [chosen[0]] : chosen;
-
-        const features = toDraw
-            .map((v) => lineFor(v.shape_id))
-            .filter((c): c is [number, number][] => Boolean(c?.length))
+        const features = lines
             .map((coordinates) => ({
                 type: "Feature" as const,
                 properties: { shape_id: "" },
@@ -512,18 +511,16 @@ export default function Index() {
         if (!hoverDetail || hoverDetail.route_id !== hoverRouteId) return null;
         if (detail?.route_id === hoverDetail.route_id) return null;
 
-        const trunk = (hoverDetail.variants ?? []).filter(
-            (v) => v.kind === "utama"
-        );
-        // One direction only, as for a selected route: both follow the same
-        // corridor and drawing both z-fights.
-        const shapeIds = trunk.length
-            ? [trunk[0].shape_id]
-            : Object.keys(hoverDetail.geometryByShape ?? {});
+        // The same lines a selected route would draw, so the preview does not
+        // jump when the route is clicked and the real layer takes over.
+        const trunk = trunkLines(hoverDetail);
+        const lines: [number, number][][] = trunk.length
+            ? trunk
+            : Object.values(hoverDetail.geometryByShape ?? {}).filter(
+                  (c): c is [number, number][] => Boolean(c?.length)
+              );
 
-        const features = shapeIds
-            .map((s) => hoverDetail.geometryByShape?.[s])
-            .filter((c): c is [number, number][] => Boolean(c?.length))
+        const features = lines
             .map((coordinates) => ({
                 type: "Feature" as const,
                 properties: { shape_id: "" },
