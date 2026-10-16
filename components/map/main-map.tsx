@@ -176,6 +176,17 @@ interface MainMapComponentProps {
      */
     hideOverview?: boolean;
     /**
+     * Pixels of map hidden under an overlay on the left (the floating route
+     * card on wide screens). Added to fitBounds' left padding so a framed
+     * route is never drawn beneath the card.
+     */
+    leftInset?: number;
+    /**
+     * Fly to a stop without selecting it -- no popup, the route stays drawn.
+     * `seq` changes on every request so re-clicking the same stop re-focuses.
+     */
+    focusPoint?: { lat: number; lon: number; name: string; seq: number } | null;
+    /**
      * Show the route pins, and their names, even below the usual zoom gates.
      * The hover preview's terminals must be readable from the default
      * overview zoom (10), which both gates treat as "too far out".
@@ -550,6 +561,8 @@ const MainMapComponent = ({
     layers,
     previewLayer = null,
     hideOverview = false,
+    leftInset = 0,
+    focusPoint = null,
     forcePins = false,
     routeStops,
     overview,
@@ -785,13 +798,35 @@ const MainMapComponent = ({
         map.fitBounds(bounds, {
             // Leaves room for the stop labels, which extend to the right of
             // their pin, and keeps the line clear of the zoom controls.
-            padding: { top: 64, bottom: 64, left: 64, right: 96 },
+            padding: { top: 64, bottom: 64, left: 64 + leftInset, right: 96 },
             // A single stop would otherwise zoom to maxZoom.
             maxZoom: 15,
             duration: 900,
             essential: true,
         });
+        // leftInset is read, not reacted to: the card resizing must not
+        // re-frame a route the user has since panned away from.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [bounds]);
+
+    // A stop picked from the route card: centre it, raising the zoom to the
+    // stop level only if further out. The visible map's centre is offset by
+    // the card, so it is centred in the uncovered part, not under the card.
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !focusPoint) return;
+        map.easeTo({
+            center: [focusPoint.lon, focusPoint.lat],
+            zoom: Math.max(map.getZoom(), stopFocusZoom),
+            // `offset`, not `padding`: easeTo's padding persists on the map
+            // and would silently skew every later camera move.
+            offset: [leftInset / 2, 0],
+            duration: 600,
+            essential: true,
+        });
+        // Keyed on the request, not on leftInset changing.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [focusPoint?.seq]);
 
     return (
         <MapGL
@@ -1073,7 +1108,9 @@ const MainMapComponent = ({
             {(forcePins || zoomLevel > zoomThreshold) && routeClusters.length > 0 && (
                 <StopMarkers
                     clusters={routeClusters}
-                    activeName={activeStop?.name ?? null}
+                    // The card-focused stop is highlighted like a selected one,
+                    // but without the popup.
+                    activeName={activeStop?.name ?? focusPoint?.name ?? null}
                     hoveredName={hoveredStop}
                     showLabels={forcePins || zoomLevel >= labelThreshold}
                     textFont={LABEL_FONT}

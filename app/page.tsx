@@ -28,10 +28,13 @@ import type {
     StationSearchHit,
 } from "@/utils/types/gtfs";
 import type { FeatureCollection } from "geojson";
+import { DualLine, SingleLine } from "@/components/route/route-line-diagram";
+import { dualDiagramFor, singleDiagramFor } from "@/utils/line-diagram";
 
 import { ArrowLeft, ChevronRight, MapPin, Route, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMediaQuery } from "@/hooks/use-media-query";
 
 export default function Index() {
     const [selectedMode, setSelectedMode] = useState<string>("Transjakarta");
@@ -48,6 +51,28 @@ export default function Index() {
 
     // Mobile bottom-sheet height. Ignored at md+ where the sidebar is a column.
     const [sheetOpen, setSheetOpen] = useState(false);
+
+    // lg (1024px) and up: the route panel floats over the map beside a
+    // narrower sidebar. Below that there is no room for a second panel, so it
+    // lives at the top of the sidebar (the bottom sheet on phones) instead.
+    const isWide = useMediaQuery("(min-width: 1024px)");
+
+    // A stop picked from the route panel: the map flies there and highlights
+    // it, but the station popup is not opened and the route stays selected.
+    const [focusStop, setFocusStop] = useState<
+        (RouteStop & { seq: number }) | null
+    >(null);
+    const focusStopAt = useCallback((s: RouteStop) => {
+        setFocusStop((prev) => ({ ...s, seq: (prev?.seq ?? 0) + 1 }));
+        // Phones: drop the sheet so the map is visible when it arrives.
+        setSheetOpen(false);
+    }, []);
+
+    // Width of the floating panel, so fitBounds and stop focus keep the route
+    // out from under it. Measured, not assumed: the panel is narrower for a
+    // single line than for the two-direction diagram, and can be collapsed.
+    const [cardWidth, setCardWidth] = useState(0);
+    const cardRef = useRef<HTMLDivElement | null>(null);
 
     // Route under the pointer in the sidebar list. Drawn as a preview only --
     // it never feeds `layers`, so the map's fitBounds is not triggered.
@@ -76,6 +101,31 @@ export default function Index() {
     // True once "tampilkan rute" has been pressed: the sidebar panel and the
     // drawn routes both follow from this, the popup alone does not.
     const [stationExpanded, setStationExpanded] = useState(false);
+
+    const cardShown = isWide && !station && !!detail;
+    // What the card will measure once rendered -- w-96 when the route gets
+    // the two-direction diagram, else w-72. fitBounds runs in the same commit
+    // the route arrives in, before the card's ResizeObserver can report, so
+    // the first framing must not depend on that measurement.
+    const expectedCardWidth = useMemo(
+        () => (detail && !variantTripId && dualDiagramFor(detail) ? 384 : 288),
+        [detail, variantTripId]
+    );
+    useEffect(() => {
+        const el = cardRef.current;
+        if (!cardShown || !el) {
+            setCardWidth(0);
+            return;
+        }
+        // The card's own box, not the absolutely-positioned wrapper (which is
+        // full-height but only as wide as its content).
+        const measure = () =>
+            setCardWidth(Math.round(el.getBoundingClientRect().width));
+        measure();
+        const ro = new ResizeObserver(measure);
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, [cardShown]);
 
     // Load the lightweight index once (~41 KB). Geometry is fetched per route.
     useEffect(() => {
@@ -180,6 +230,8 @@ export default function Index() {
         abortRef.current = ctrl;
         // A new route starts on its trunk.
         setVariantTripId(null);
+        // ...and with nothing focused from the previous route's panel.
+        setFocusStop(null);
 
         (async () => {
             setDetailLoading(true);
@@ -353,6 +405,7 @@ export default function Index() {
      */
     const clearSelection = useCallback(() => {
         abortRef.current?.abort();
+        setFocusStop(null);
         clearStation();
         setSelectedRouteId(null);
         setVariantTripId(null);
@@ -635,7 +688,7 @@ export default function Index() {
               them across newlines and they are never generated.
             */}
             <aside
-                className={`order-2 flex w-full shrink-0 flex-col rounded-t-2xl bg-jakarta text-white transition-[height] duration-300 ease-out md:order-1 md:h-full md:w-96 md:rounded-none md:transition-none ${
+                className={`order-2 flex w-full shrink-0 flex-col rounded-t-2xl bg-jakarta text-white transition-[height] duration-300 ease-out md:order-1 md:h-full md:w-96 md:rounded-none lg:w-80 md:transition-none ${
                     sheetOpen ? "h-[70%]" : "h-[42%]"
                 }`}
             >
@@ -790,6 +843,20 @@ export default function Index() {
                                 </div>
                             )}
 
+                        {!isWide && !station && detail && (
+                            <div className="-mr-4 -ml-4 mb-3 border-b border-white/10 pb-2">
+                                <VariantPanel
+                                    detail={detail}
+                                    selected={variantTripId}
+                                    onSelect={setVariantTripId}
+                                    onClear={clearSelection}
+                                    onStop={focusStopAt}
+                                    focusedStopId={focusStop?.stop_id ?? null}
+                                    embedded
+                                />
+                            </div>
+                        )}
+
                         {!stationExpanded &&
                             !routesLoading &&
                             filteredRoutes.map((r) => {
@@ -873,18 +940,44 @@ export default function Index() {
                     about the thing being drawn, so it belongs next to it.
                     Hidden while a stop popup is open so the two cards never
                     compete for the same corner. */}
-                {!station && detail && (
-                    <VariantPanel
-                        detail={detail}
-                        selected={variantTripId}
-                        onSelect={setVariantTripId}
-                        onClear={clearSelection}
-                    />
+                {isWide && !station && detail && (
+                    <div
+                        ref={cardRef}
+                        className="pointer-events-auto absolute top-3 bottom-3 left-3 z-20 flex flex-col items-start"
+                    >
+                        <VariantPanel
+                            detail={detail}
+                            selected={variantTripId}
+                            onSelect={setVariantTripId}
+                            onClear={clearSelection}
+                            onStop={focusStopAt}
+                            focusedStopId={focusStop?.stop_id ?? null}
+                        />
+                    </div>
                 )}
 
                 <MainMapComponent
                     layers={layers}
                     previewLayer={previewLayer}
+                    leftInset={
+                        // The larger of the two: the measurement lags a
+                        // route switch (it still holds the previous card's
+                        // width when fitBounds runs), and over-padding by a
+                        // few px is harmless where under-padding hides route.
+                        cardShown
+                            ? Math.max(cardWidth, expectedCardWidth) + 12
+                            : 0
+                    }
+                    focusPoint={
+                        focusStop
+                            ? {
+                                  lat: focusStop.stop_lat,
+                                  lon: focusStop.stop_lon,
+                                  name: removeOppStopPrefix(focusStop.stop_name),
+                                  seq: focusStop.seq,
+                              }
+                            : null
+                    }
                     // Keyed on the hover itself, not on the loaded preview:
                     // the route takes a moment to arrive and the network
                     // must already be gone, or it flashes back in between.
@@ -941,17 +1034,61 @@ function VariantPanel({
     selected,
     onSelect,
     onClear,
+    onStop,
+    focusedStopId,
+    embedded = false,
 }: {
     detail: RouteDetail;
     selected: string | null;
     onSelect: (tripId: string | null) => void;
     /** Clears the whole route selection; rendered in this panel's header. */
     onClear: () => void;
+    /** A stop name was clicked: focus the map on it (no popup). */
+    onStop: (stop: RouteStop) => void;
+    focusedStopId?: string | null;
+    /**
+     * Rendered inside the sidebar (narrow screens) rather than floating over
+     * the map: no card chrome, and the sidebar is what scrolls.
+     */
+    embedded?: boolean;
 }) {
     const [showOther, setShowOther] = useState(false);
-    const [collapsed, setCollapsed] = useState(false);
+    // Collapsed by default: the stop diagram is what most people want, and
+    // the pattern picker is one click away.
+    const [collapsed, setCollapsed] = useState(true);
+    const [stopsOpen, setStopsOpen] = useState(true);
+    // Which main direction the stop list follows. Tagged with the route so it
+    // resets on its own when another route is picked, without an effect.
+    const [trunkSel, setTrunkSel] = useState({ rid: "", i: 0 });
 
     const variants = detail.variants ?? [];
+    const trunks = variants.filter((v) => v.kind === "utama");
+    const trunkIdx =
+        trunkSel.rid === detail.route_id
+            ? Math.min(trunkSel.i, Math.max(trunks.length - 1, 0))
+            : 0;
+    // The pattern the map is drawing: the chosen variant, else a main one.
+    const shown =
+        (selected && variants.find((v) => v.trip_id === selected)) ||
+        trunks[trunkIdx] ||
+        variants[0];
+
+    // Both directions side by side when they mirror each other (most BRT
+    // trunks); otherwise the shown pattern as a single line. A picked
+    // diversion is always single -- it is one direction by definition.
+    const dual = useMemo(
+        () => (selected ? null : dualDiagramFor(detail)),
+        [detail, selected]
+    );
+    const lineStops = useMemo(
+        () => (shown ? singleDiagramFor(detail, shown).stops : []),
+        [detail, shown]
+    );
+    const stopCount = dual
+        ? dual.rows.length
+        : lineStops.length;
+    const color = "#" + detail.route_color;
+
     // Rendered even for a single pattern (40 of 240 routes): the card carries
     // the only clear-selection control, and the pattern list simply collapses
     // to one row.
@@ -1008,7 +1145,17 @@ function VariantPanel({
         : "Utama";
 
     return (
-        <div className="pointer-events-auto absolute top-3 left-3 z-20 flex max-h-[calc(100%-1.5rem)] w-60 flex-col overflow-hidden rounded-lg bg-jakarta/95 text-white shadow-xl ring-1 ring-white/10 backdrop-blur-sm">
+        <div
+            className={
+                embedded
+                    ? "flex flex-col text-white"
+                    : // Two names per row need ~380px; one needs far less.
+                      // Measured by the page, so fitBounds follows either.
+                      `flex max-h-full min-h-0 flex-col overflow-hidden rounded-lg bg-jakarta/95 text-white shadow-xl ring-1 ring-white/10 backdrop-blur-sm ${
+                          dual && stopsOpen ? "w-96" : "w-72"
+                      }`
+            }
+        >
             {/*
               Which route this panel belongs to. Without it the card showed
               only pattern names, so it was not obvious what was being
@@ -1046,6 +1193,10 @@ function VariantPanel({
 
             <div className="mx-3 shrink-0 border-t border-white/10" />
 
+            {/* One scroll area for everything under the header: the pattern
+                picker and the stop line together can be far taller than the
+                card, and nested scrollers would trap the wheel. */}
+            <div className={embedded ? "" : "min-h-0 flex-1 overflow-y-auto"}>
             <button
                 type="button"
                 onClick={() => setCollapsed((c) => !c)}
@@ -1072,10 +1223,7 @@ function VariantPanel({
             </button>
 
             {!collapsed && (
-                // min-h-0 lets this flex child actually shrink, so the list
-                // scrolls inside the card instead of pushing the footnote
-                // past the bottom edge.
-                <div className="min-h-0 flex-1 overflow-y-auto pb-1">
+                <div className="pb-1">
 
             {variants
                 .filter((v) => v.kind === "utama")
@@ -1157,17 +1305,88 @@ function VariantPanel({
                 </div>
             )}
 
-            {/*
-              Pinned outside the scroll area. It used to sit inside, so once
-              the variant list overflowed the card's max height the footnote
-              was pushed below the fold and clipped.
-            */}
             {!collapsed && (
-                <p className="shrink-0 border-t border-white/10 px-3 pt-2 pb-2.5 text-[10px] leading-snug text-white/35">
+                <p className="px-3 pt-1 pb-2.5 text-[10px] leading-snug text-white/35">
                     Hanya tampil bila dipilih. GTFS tidak mencatat pengalihan
                     yang sedang berlaku.
                 </p>
             )}
+
+            <div className="mx-3 border-t border-white/10" />
+
+            <button
+                type="button"
+                onClick={() => setStopsOpen((o) => !o)}
+                aria-expanded={stopsOpen}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-white/5"
+            >
+                <MapPin size={13} className="shrink-0 opacity-60" />
+                <span className="min-w-0 flex-1 text-[10px] font-bold tracking-wide text-white/40 uppercase">
+                    Halte{stopCount > 0 ? " \u00b7 " + stopCount : ""}
+                </span>
+                <ChevronRight
+                    size={14}
+                    className={`shrink-0 opacity-60 transition-transform ${
+                        stopsOpen ? "rotate-90" : ""
+                    }`}
+                />
+            </button>
+
+            {stopsOpen && (
+                <div className="pb-3">
+                    {/* Two main directions: let the list follow either. Only
+                        while no specific pattern is picked -- a picked
+                        pattern is one direction already. */}
+                    {!dual && !selected && trunks.length > 1 && (
+                        <div className="grid grid-cols-2 gap-1 px-3 pb-2">
+                            {trunks.map((v, i) => (
+                                <button
+                                    key={v.trip_id}
+                                    type="button"
+                                    aria-pressed={i === trunkIdx}
+                                    title={v.headsign}
+                                    onClick={() =>
+                                        setTrunkSel({
+                                            rid: detail.route_id,
+                                            i,
+                                        })
+                                    }
+                                    className={`cursor-pointer truncate rounded px-2 py-1 text-[11px] font-pt-sans transition-colors ${
+                                        i === trunkIdx
+                                            ? "bg-white/15 text-white"
+                                            : "text-white/50 hover:bg-white/10"
+                                    }`}
+                                >
+                                    {dirLabel(v.direction_id)} {v.headsign}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                    {selected && shown && (
+                        <div className="truncate px-3 pb-2 text-[11px] text-white/50">
+                            {dirLabel(shown.direction_id)}{" "}
+                            {shown.via ? "via " + shown.via : shown.headsign}
+                        </div>
+                    )}
+
+                    {dual ? (
+                        <DualLine
+                            diagram={dual}
+                            color={color}
+                            onStop={onStop}
+                            focusedId={focusedStopId}
+                        />
+                    ) : (
+                        <SingleLine
+                            stops={lineStops}
+                            color={color}
+                            onStop={onStop}
+                            focusedId={focusedStopId}
+                        />
+                    )}
+                </div>
+            )}
+            </div>
         </div>
     );
 }
