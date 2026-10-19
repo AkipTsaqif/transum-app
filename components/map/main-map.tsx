@@ -1,6 +1,7 @@
 "use client";
 
 import MapGL, {
+    AttributionControl,
     Layer,
     NavigationControl,
     Popup,
@@ -76,25 +77,27 @@ const LABEL_FONT = ["PT Sans Narrow Bold"];
 
 /**
  * Credit for the transit data, shown alongside the basemap's own credits in
- * MapLibre's attribution control.
+ * MapLibre's attribution control. Which one depends on the dataset.
  *
- * Every route, stop and timetable comes from Transjakarta's official GTFS
- * Static feed, which PT Transportasi Jakarta publishes under CC BY 4.0 (see
- * https://ppid.transjakarta.co.id/informasi/berkala). The licence requires
- * credit, a link to the licence, and an indication of changes -- hence
- * "diolah": stops are merged into stations and trips are classified into
- * patterns here, neither of which is in the original feed.
+ * gtfs: every route, stop and timetable comes from Transjakarta's official
+ * GTFS Static feed, which PT Transportasi Jakarta publishes under CC BY 4.0
+ * (see https://ppid.transjakarta.co.id/informasi/berkala). The licence
+ * requires credit, a link to the licence, and an indication of changes --
+ * hence "diolah": stops are merged into stations and trips are classified
+ * into patterns here, neither of which is in the original feed.
  *
- * The basemap credits (OpenFreeMap, OpenMapTiles, OpenStreetMap) are added
- * automatically from the tile source, so they are not repeated here.
+ * krl: line geometry and stations come from OpenStreetMap contributors
+ * (ODbL), also processed here.
  *
- * Module-level on purpose: react-map-gl only reads `attributionControl` when
- * the map is constructed, so the value must be stable.
+ * The basemap's own credits (OpenFreeMap, OpenMapTiles, OpenStreetMap) are
+ * added automatically from the tile source, so they are not repeated here.
  */
-const ATTRIBUTION_CONTROL = {
-    customAttribution:
+const ATTRIBUTION: Record<"gtfs" | "krl", string> = {
+    gtfs:
         'Data rute \u00a9 <a href="https://ppid.transjakarta.co.id/informasi/berkala" target="_blank" rel="noopener noreferrer">PT Transportasi Jakarta</a>, ' +
         '<a href="https://creativecommons.org/licenses/by/4.0/deed.id" target="_blank" rel="noopener noreferrer">CC BY 4.0</a> \u00b7 diolah',
+    krl:
+        'Data rute KRL \u00a9 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">kontributor OpenStreetMap</a> \u00b7 diolah',
 };
 
 /**
@@ -175,6 +178,8 @@ interface MainMapComponentProps {
      * the instant the hover starts.
      */
     hideOverview?: boolean;
+    /** Which dataset is shown; selects the data credit. */
+    mode?: "gtfs" | "krl";
     /**
      * Pixels of map hidden under an overlay on the left (the floating route
      * card on wide screens). Added to fitBounds' left padding so a framed
@@ -561,6 +566,7 @@ const MainMapComponent = ({
     layers,
     previewLayer = null,
     hideOverview = false,
+    mode = "gtfs",
     leftInset = 0,
     focusPoint = null,
     forcePins = false,
@@ -905,9 +911,26 @@ const MainMapComponent = ({
             // mobile layout, where the map shares the screen with a bottom sheet.
             style={{ width: "100%", height: "100%" }}
             mapStyle={styleUrl}
-            attributionControl={ATTRIBUTION_CONTROL}
+            // The built-in control is configured once at construction, so it
+            // cannot follow the mode; the one below is keyed on it instead.
+            attributionControl={false}
         >
-            <NavigationControl position="bottom-right" />
+            {/*
+              Order matters: MapLibre stacks the controls of a corner with the
+              LAST-added on top. Attribution has to be added first to sit at
+              the very bottom, under the zoom buttons, as the built-in one
+              always did. Both are keyed on the mode so that a remount (which
+              re-adds them) keeps that order -- remounting only the
+              attribution would re-add it last and float it above the zoom
+              buttons.
+            */}
+            <AttributionControl
+                key={"attr-" + mode}
+                position="bottom-right"
+                compact
+                customAttribution={ATTRIBUTION[mode]}
+            />
+            <NavigationControl key={"nav-" + mode} position="bottom-right" />
 
             {/*
               The whole network, faint, as context. One GPU-rendered GeoJSON
@@ -936,17 +959,22 @@ const MainMapComponent = ({
                             // Colour travels in the feature, so all 700 lines
                             // stay a single draw call.
                             "line-color": ["get", "color"],
-                            "line-opacity": 0.35,
-                            // Thinner when zoomed out, where lines bunch up.
-                            "line-width": [
-                                "interpolate",
-                                ["linear"],
-                                ["zoom"],
-                                9,
-                                1,
-                                13,
-                                2.5,
-                            ],
+                            // Match a selected route in KRL mode, even if an
+                            // old cached overview has no opacity/width fields.
+                            // Transjakarta's dense network remains faint.
+                            "line-opacity": mode === "krl" ? 1 : 0.35,
+                            "line-width":
+                                mode === "krl"
+                                    ? 3
+                                    : [
+                                          "interpolate",
+                                          ["linear"],
+                                          ["zoom"],
+                                          9,
+                                          1,
+                                          13,
+                                          2.5,
+                                      ],
                         }}
                     />
                 </Source>

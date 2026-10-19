@@ -35,9 +35,20 @@ import { ArrowLeft, ChevronRight, MapPin, Route, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import type { TransitMode } from "@/lib/gtfs";
+
+/** What the mode picker offers. `ready: false` entries are listed but off. */
+const MODES: { value: TransitMode | "mrt"; label: string; ready: boolean }[] = [
+    { value: "gtfs", label: "Transjakarta", ready: true },
+    { value: "krl", label: "KRL Commuter Line", ready: true },
+    { value: "mrt", label: "MRT Jakarta", ready: false },
+];
+const modeLabel = (m: TransitMode) =>
+    MODES.find((x) => x.value === m)?.label ?? m;
 
 export default function Index() {
-    const [selectedMode, setSelectedMode] = useState<string>("Transjakarta");
+    // Which dataset the app is showing; also the /api/<mode>/ path segment.
+    const [mode, setMode] = useState<TransitMode>("gtfs");
     const [searchQuery, setSearchQuery] = useState<string>("");
 
     const [routes, setRoutes] = useState<RouteSummary[]>([]);
@@ -108,7 +119,7 @@ export default function Index() {
     // the route arrives in, before the card's ResizeObserver can report, so
     // the first framing must not depend on that measurement.
     const expectedCardWidth = useMemo(
-        () => (detail && !variantTripId && dualDiagramFor(detail) ? 384 : 288),
+        () => (detail && detail.route_id !== "C" && !variantTripId && dualDiagramFor(detail) ? 384 : 288),
         [detail, variantTripId]
     );
     useEffect(() => {
@@ -127,6 +138,40 @@ export default function Index() {
         return () => ro.disconnect();
     }, [cardShown]);
 
+    // Switching dataset invalidates everything tied to the old one: the
+    // selection and station, the hover preview and its cache, and the
+    // city-wide stop layer (fetched lazily per mode).
+    const switchMode = useCallback(
+        (next: TransitMode) => {
+            if (next === mode) return;
+            abortRef.current?.abort();
+            stationAbortRef.current?.abort();
+            allStopsAbortRef.current?.abort();
+            setSelectedRouteId(null);
+            setVariantTripId(null);
+            setDetail(null);
+            setDetailError(null);
+            setDetailLoading(false);
+            setHoverRouteId(null);
+            setHoverDetail(null);
+            hoverCache.current.clear();
+            setFocusStop(null);
+            setStation(null);
+            setStationRoutes([]);
+            setStationError(null);
+            setStationLoading(false);
+            setStationExpanded(false);
+            setAllStops(null);
+            stopsRequested.current = false;
+            setOverview(null);
+            setRoutes([]);
+            setSearchQuery("");
+            setStopHits([]);
+            setMode(next);
+        },
+        [mode]
+    );
+
     // Load the lightweight index once (~41 KB). Geometry is fetched per route.
     useEffect(() => {
         let cancelled = false;
@@ -135,7 +180,7 @@ export default function Index() {
             setRoutesLoading(true);
             setRoutesError(null);
             try {
-                const res = await fetch("/api/gtfs/routes");
+                const res = await fetch(`/api/${mode}/routes`);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data: RouteSummary[] = await res.json();
                 if (!cancelled) setRoutes(data);
@@ -154,7 +199,7 @@ export default function Index() {
         return () => {
             cancelled = true;
         };
-    }, [selectedMode]);
+    }, [mode]);
 
     // Load the overview once, after the route list -- it is context, not
     // content, so it must never delay the interactive part of the page.
@@ -163,7 +208,7 @@ export default function Index() {
 
         (async () => {
             try {
-                const res = await fetch("/api/gtfs/overview");
+                const res = await fetch(`/api/${mode}/overview`);
                 if (!res.ok) return;
                 const data: ShapeCollection = await res.json();
                 if (!cancelled) setOverview(data);
@@ -175,7 +220,7 @@ export default function Index() {
         return () => {
             cancelled = true;
         };
-    }, []);
+    }, [mode]);
 
     // Fetch the hovered route's geometry. The delay keeps a quick sweep down
     // the list from firing a request per row; only a pointer that rests on a
@@ -195,7 +240,7 @@ export default function Index() {
         const timer = setTimeout(async () => {
             try {
                 const res = await fetch(
-                    `/api/gtfs/routes/${encodeURIComponent(hoverRouteId)}`,
+                    `/api/${mode}/routes/${encodeURIComponent(hoverRouteId)}`,
                     { signal: ctrl.signal }
                 );
                 if (!res.ok) return;
@@ -211,7 +256,7 @@ export default function Index() {
             clearTimeout(timer);
             ctrl.abort();
         };
-    }, [hoverRouteId]);
+    }, [hoverRouteId, mode]);
 
     // Fetch one route's geometry + stops on selection (~27 KB).
     // An AbortController keeps fast clicking from racing stale responses in.
@@ -238,7 +283,7 @@ export default function Index() {
             setDetailError(null);
             try {
                 const res = await fetch(
-                    `/api/gtfs/routes/${encodeURIComponent(selectedRouteId)}`,
+                    `/api/${mode}/routes/${encodeURIComponent(selectedRouteId)}`,
                     { signal: ctrl.signal }
                 );
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -254,6 +299,9 @@ export default function Index() {
         })();
 
         return () => ctrl.abort();
+        // `mode` is deliberately not a dependency: switching mode clears the
+        // selection first, which is what re-runs this.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedRouteId]);
 
     /**
@@ -290,7 +338,7 @@ export default function Index() {
         setStationExpanded(false);
 
         try {
-            const res = await fetch(`/api/gtfs/stops/resolve?${query}`, {
+            const res = await fetch(`/api/${mode}/stops/resolve?${query}`, {
                 signal: ctrl.signal,
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -305,7 +353,7 @@ export default function Index() {
         } finally {
             if (!ctrl.signal.aborted) setStationLoading(false);
         }
-    }, []);
+    }, [mode]);
 
     /**
      * "Tampilkan rute di peta": fetch every calling route's geometry, draw
@@ -328,7 +376,7 @@ export default function Index() {
             const results = await Promise.all(
                 station.routes.map(async (r) => {
                     const g = await fetch(
-                        `/api/gtfs/routes/${encodeURIComponent(r.route_id)}`,
+                        `/api/${mode}/routes/${encodeURIComponent(r.route_id)}`,
                         { signal: ctrl.signal }
                     );
                     if (!g.ok) return null;
@@ -344,7 +392,7 @@ export default function Index() {
         } finally {
             if (!ctrl.signal.aborted) setStationLoading(false);
         }
-    }, [station]);
+    }, [station, mode]);
 
     const showAllStops = !selectedRouteId && !station;
 
@@ -353,22 +401,28 @@ export default function Index() {
      * The ref guards against the map firing this on every zoom change.
      */
     const stopsRequested = useRef(false);
+    const allStopsAbortRef = useRef<AbortController | null>(null);
 
     const loadAllStops = useCallback(() => {
         if (stopsRequested.current) return;
         stopsRequested.current = true;
+        const ctrl = new AbortController();
+        allStopsAbortRef.current = ctrl;
 
         (async () => {
             try {
-                const res = await fetch("/api/gtfs/stops/geo");
-                if (!res.ok) return;
-                setAllStops((await res.json()) as FeatureCollection);
+                const res = await fetch(`/api/${mode}/stops/geo`, {
+                    signal: ctrl.signal,
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = (await res.json()) as FeatureCollection;
+                if (!ctrl.signal.aborted) setAllStops(data);
             } catch {
                 // Non-fatal: zooming in simply shows no extra pins.
-                stopsRequested.current = false;
+                if (!ctrl.signal.aborted) stopsRequested.current = false;
             }
         })();
-    }, []);
+    }, [mode]);
 
     /**
      * Resolve a station clicked on the GPU stop layer. Same path as a marker
@@ -384,9 +438,7 @@ export default function Index() {
                 sequence: 0,
             });
         },
-        // handleStopClick is stable (useCallback with [] deps).
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        []
+        [handleStopClick]
     );
 
     const clearStation = useCallback(() => {
@@ -646,7 +698,7 @@ export default function Index() {
         const timer = setTimeout(async () => {
             try {
                 const res = await fetch(
-                    `/api/gtfs/search?q=${encodeURIComponent(q)}`,
+                    `/api/${mode}/search?q=${encodeURIComponent(q)}`,
                     { signal: ctrl.signal }
                 );
                 if (!res.ok) return;
@@ -660,7 +712,7 @@ export default function Index() {
             clearTimeout(timer);
             ctrl.abort();
         };
-    }, [searchQuery]);
+    }, [searchQuery, mode]);
 
     // Derived state belongs in useMemo, not in a useEffect + setState pair.
     const filteredRoutes = useMemo(() => {
@@ -704,14 +756,15 @@ export default function Index() {
                 </button>
 
                 <div className="hidden items-center p-4 text-xl font-bold font-pt-sans md:flex">
-                    <Link href={"/"}>Transum App - {selectedMode}</Link>
+                    <Link href={"/"}>Transum App - {modeLabel(mode)}</Link>
                 </div>
                 <Separator className="hidden md:block" />
-                <div className="hidden w-full flex-col p-4 md:flex">
+                <div className="flex w-full flex-col px-4 pb-3 pt-1 md:p-4">
                     <Select
-                        onValueChange={(val) => setSelectedMode(val)}
-                        defaultValue="Transjakarta"
-                        disabled
+                        value={mode}
+                        onValueChange={(val) => {
+                            if (val === "gtfs" || val === "krl") switchMode(val);
+                        }}
                     >
                         <SelectTrigger className="w-full border-white/20 bg-white/10 text-white [&>svg]:opacity-70">
                             <SelectValue placeholder="Pilih moda" />
@@ -721,13 +774,16 @@ export default function Index() {
                                 <SelectLabel className="pl-4">
                                     Jakarta
                                 </SelectLabel>
-                                <SelectItem value="Transjakarta">
-                                    Transjakarta
-                                </SelectItem>
-                                <SelectItem value="MRT Jakarta">
-                                    MRT Jakarta
-                                </SelectItem>
-                                <SelectItem value="KCI">KCI</SelectItem>
+                                {MODES.map((m) => (
+                                    <SelectItem
+                                        key={m.value}
+                                        value={m.value}
+                                        disabled={!m.ready}
+                                    >
+                                        {m.label}
+                                        {!m.ready && " (segera)"}
+                                    </SelectItem>
+                                ))}
                             </SelectGroup>
                         </SelectContent>
                     </Select>
@@ -980,6 +1036,7 @@ export default function Index() {
                     // the route takes a moment to arrive and the network
                     // must already be gone, or it flashes back in between.
                     hideOverview={!!hoverRouteId && !stationExpanded}
+                    mode={mode}
                     forcePins={previewEnds.length > 0}
                     routeStops={pinStops}
                     overview={overview}
@@ -1061,6 +1118,16 @@ function VariantPanel({
 
     const variants = detail.variants ?? [];
     const trunks = variants.filter((v) => v.kind === "utama");
+    // Cikarang's two main rackets each visit Cikarang twice, with a city loop
+    // between. They are not an outward/return pair: aligning them on two rails
+    // would duplicate Jatinegara and imply stops in the wrong direction.
+    const circuit =
+        detail.route_id === "C" &&
+        trunks.some(
+            (v) =>
+                v.stopIds.length > 2 &&
+                v.stopIds[0] === v.stopIds[v.stopIds.length - 1]
+        );
     const trunkIdx =
         trunkSel.rid === detail.route_id
             ? Math.min(trunkSel.i, Math.max(trunks.length - 1, 0))
@@ -1071,12 +1138,12 @@ function VariantPanel({
         trunks[trunkIdx] ||
         variants[0];
 
-    // Both directions side by side when they mirror each other (most BRT
-    // trunks); otherwise the shown pattern as a single line. A picked
-    // diversion is always single -- it is one direction by definition.
+    // Both directions side by side when they mirror each other. Each
+    // Cikarang racket is itself a complete loop and must remain an ordered
+    // single line. Selecting either main pattern also shows just that line.
     const dual = useMemo(
-        () => (selected ? null : dualDiagramFor(detail)),
-        [detail, selected]
+        () => (selected || circuit ? null : dualDiagramFor(detail)),
+        [detail, selected, circuit]
     );
     const lineStops = useMemo(
         () => (shown ? singleDiagramFor(detail, shown).stops : []),
@@ -1140,7 +1207,9 @@ function VariantPanel({
               const v = variants.find((x) => x.trip_id === selected);
               return v ? (v.via ? `via ${v.via}` : v.headsign) : "Utama";
           })()
-        : "Utama";
+        : circuit
+          ? "Kedua arah putaran"
+          : "Utama";
 
     return (
         <div
@@ -1223,20 +1292,34 @@ function VariantPanel({
             {!collapsed && (
                 <div className="pb-1">
 
+            {circuit && (
+                <Row
+                    id="C-all"
+                    active={selected === null}
+                    title="Kedua arah putaran"
+                    sub="Tampilkan kedua jalur di peta"
+                    onClick={() => onSelect(null)}
+                />
+            )}
+
             {variants
                 .filter((v) => v.kind === "utama")
                 .map((v) => (
                     <Row
                         key={v.trip_id}
                         id={v.trip_id}
-                        active={selected === null}
-                        title={`Utama ${dirLabel(v.direction_id)} ${v.headsign}`}
-                        sub={`${v.stopCount} halte${
+                        active={circuit ? selected === v.trip_id : selected === null}
+                        title={
+                            circuit
+                                ? `Putaran via ${v.via ?? v.headsign}`
+                                : `Utama ${dirLabel(v.direction_id)} ${v.headsign}`
+                        }
+                        sub={`${v.stopCount} ${detail.route_id === "C" ? "pemberhentian" : "halte"}${
                             v.headwaySecs
                                 ? ` \u00b7 tiap ${Math.round(v.headwaySecs / 60)} mnt`
                                 : ""
                         }`}
-                        onClick={() => onSelect(null)}
+                        onClick={() => onSelect(circuit ? v.trip_id : null)}
                     />
                 ))}
 
@@ -1305,8 +1388,9 @@ function VariantPanel({
 
             {!collapsed && (
                 <p className="px-3 pt-1 pb-2.5 text-[10px] leading-snug text-white/35">
-                    Hanya tampil bila dipilih. GTFS tidak mencatat pengalihan
-                    yang sedang berlaku.
+                    {detail.route_id === "C"
+                        ? "Pola dari OpenStreetMap; tidak ada jadwal kereta dalam data ini."
+                        : "Hanya tampil bila dipilih. GTFS tidak mencatat pengalihan yang sedang berlaku."}
                 </p>
             )}
 
@@ -1320,7 +1404,8 @@ function VariantPanel({
             >
                 <MapPin size={13} className="shrink-0 opacity-60" />
                 <span className="min-w-0 flex-1 text-[10px] font-bold tracking-wide text-white/40 uppercase">
-                    Halte{stopCount > 0 ? " \u00b7 " + stopCount : ""}
+                    {detail.route_id === "C" ? "Pemberhentian" : "Halte"}
+                    {stopCount > 0 ? " \u00b7 " + stopCount : ""}
                 </span>
                 <ChevronRight
                     size={14}
@@ -1355,14 +1440,16 @@ function VariantPanel({
                                             : "text-white/50 hover:bg-white/10"
                                     }`}
                                 >
-                                    {dirLabel(v.direction_id)} {v.headsign}
+                                    {circuit
+                                        ? `via ${v.via ?? v.headsign}`
+                                        : `${dirLabel(v.direction_id)} ${v.headsign}`}
                                 </button>
                             ))}
                         </div>
                     )}
-                    {selected && shown && (
+                    {(selected || circuit) && shown && (
                         <div className="truncate px-3 pb-2 text-[11px] text-white/50">
-                            {dirLabel(shown.direction_id)}{" "}
+                            {circuit ? "Pola: " : dirLabel(shown.direction_id) + " "}
                             {shown.via ? "via " + shown.via : shown.headsign}
                         </div>
                     )}
