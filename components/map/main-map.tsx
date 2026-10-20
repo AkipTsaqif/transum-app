@@ -20,7 +20,12 @@ import type { FeatureCollection, Point } from "geojson";
 import { useTheme } from "next-themes";
 import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
 import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
-import { interchangeFeatures, interchangesFromStops, projectedInterchangeEndpoints } from "@/utils/interchange";
+import {
+    interchangeFeatures,
+    interchangeSeparationPx,
+    interchangesFromStops,
+    projectedInterchangeEndpoints,
+} from "@/utils/interchange";
 
 /**
  * MapLibre v6 loads its tile-processing worker from a URL it derives from its
@@ -142,30 +147,43 @@ interface DotSpec {
     ring: string;
 }
 
-/** Small schematic twin-platform badge for scales where the real track gap
- * projects to less than a few pixels. At close zoom the actual endpoints
- * replace it, each positioned on its own line. */
-function makeCompactInterchangeImage(): ImageData {
-    const c = document.createElement("canvas");
-    c.width = 68;
-    c.height = 36;
-    const ctx = c.getContext("2d")!;
-    ctx.scale(2, 2);
-    ctx.fillStyle = "#FFFFFF";
-    ctx.strokeStyle = "#0C1B2A";
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.roundRect(1.5, 2, 31, 14, 7);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = "#0C1B2A";
-    for (const x of [10, 24]) {
-        ctx.beginPath();
-        ctx.arc(x, 9, 2.8, 0, Math.PI * 2);
-        ctx.fill();
-    }
-    return ctx.getImageData(0, 0, c.width, c.height);
-}
+/**
+ * The stop symbol palette, shared so every marker on the map reads as the
+ * same family: navy body with a white ring.
+ *
+ * These are literals because a MapLibre paint property cannot read a CSS
+ * variable; each mirrors a theme variable exactly.
+ *
+ *   STOP_INK     --jakarta            hsl(210 55.56% 10.59%)  #0C1B2A
+ *   STOP_RING    white
+ *
+ * `--jakarta-selected` (#00629F) is deliberately NOT used here: that is the
+ * sidebar's selected-row blue, not the app's base accent.
+ */
+const STOP_INK = "#0C1B2A";
+const STOP_RING = "#FFFFFF";
+
+/**
+ * On-screen diameter of an ordinary station dot, by zoom.
+ *
+ * `all-stop-dot` is drawn at r5 with a 2px stroke, so the visible circle is
+ * 12px across with a 2px ring; scaled by `icon-size` (0.62 at z12, 1.25 at
+ * z17) that is 7.44px and 15px. The interchange connector reuses this ramp so
+ * a station looks the same size whether or not it is an interchange.
+ *
+ * A zoom expression may only appear at the top level of a property, so each
+ * derived size below is written out as its own interpolate rather than by
+ * wrapping this one in arithmetic.
+ */
+const stationDotSize = (offset = 0, scale = 1): ExpressionSpecification => [
+    "interpolate",
+    ["linear"],
+    ["zoom"],
+    12,
+    (7.44 + offset) * scale,
+    17,
+    (15 + offset) * scale,
+];
 
 /**
  * Every pin image the map registers, keyed by the id the layers refer to.
@@ -174,14 +192,14 @@ function makeCompactInterchangeImage(): ImageData {
  * reused across the zoom range beats registering one per zoom step.
  */
 const PIN_IMAGES: Record<string, DotSpec> = {
-    "stop-pin": { r: 5, stroke: 2, fill: "#0C1B2A", ring: "#FFFFFF" },
-    "stop-pin-active": { r: 7, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
+    "stop-pin": { r: 5, stroke: 2, fill: STOP_INK, ring: STOP_RING },
+    "stop-pin-active": { r: 7, stroke: 2, fill: STOP_RING, ring: STOP_INK },
     // Drawn at the size it has when `icon-size` is 1, then scaled per zoom.
-    "all-stop-dot": { r: 5, stroke: 2, fill: "#0C1B2A", ring: "#FFFFFF" },
+    "all-stop-dot": { r: 5, stroke: 2, fill: STOP_INK, ring: STOP_RING },
     // Hover: same geometry, inverted like the active route pin so the cursor
     // target is unmistakable.
-    "all-stop-dot-hover": { r: 6, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
-    "stop-pin-hover": { r: 6, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
+    "all-stop-dot-hover": { r: 6, stroke: 2, fill: STOP_RING, ring: STOP_INK },
+    "stop-pin-hover": { r: 6, stroke: 2, fill: STOP_RING, ring: STOP_INK },
 };
 
 export interface DrawnLayer {
@@ -612,18 +630,21 @@ const MainMapComponent = ({
     // (tens per route, clustered) -- show them as soon as a route is framed,
     // and keep labels for when the user is actually zoomed in.
     const zoomThreshold = 10;
-    // At the full-Cikarang fit the two 52m-apart platforms project less than
-    // one pixel apart. Show a compact transfer marker there; use the
-    // track-spanning pill only once the two endpoints can be distinguished.
-    const interchangeZoom = 13;
     // Auto-fit frames a trunk anywhere from z11.9 to z15.8 depending on how
     // long it is, so a high fixed gate hid labels on most routes right after
     // the camera settled. Collision placement already drops labels that will
     // not fit, so the gate only needs to stop the far-out view being noisy.
     const labelThreshold = 11;
     const nearbyThreshold = 55;
-    /** Below this, 6,437 pins would be an unreadable smear. */
-    const allStopsZoom = 12;
+    /**
+     * Where the city-wide station dots begin. Transjakarta has 6,437 stops,
+     * which below z12 are an unreadable smear. The KRL network is ~80
+     * stations and always spans the whole region, so its stations show from
+     * the default zoom (10) -- the same floor as the route pins -- and the
+     * overview is the network rather than an empty map. Labels keep their
+     * own, higher floor.
+     */
+    const allStopsZoom = mode === "krl" ? zoomThreshold : 12;
 
     const mapRef = useRef<MapRef | null>(null);
 
@@ -652,6 +673,20 @@ const MainMapComponent = ({
     const [mapPixels, setMapPixels] = useState<
         { width: number; height: number } | null
     >(null);
+    /**
+     * Un-quantised zoom, for the interchange only.
+     *
+     * `zoomLevel` below is floored to whole steps so that most of the map
+     * re-renders about once per level instead of once per frame. The
+     * interchange cannot use it: its endpoint spacing is a continuous function
+     * of zoom, so a floored value left the connector at the previous level's
+     * size until the camera crossed an integer boundary -- visible as the
+     * marker lagging behind and drifting off its line while zooming in.
+     *
+     * Only the interchange reads this, so the per-frame update costs one
+     * comparison and nothing else re-renders.
+     */
+    const [exactZoom, setExactZoom] = useState(10);
 
     const handleMove = useCallback((e: { viewState: { zoom: number } }) => {
         setMapPixels(
@@ -660,6 +695,8 @@ const MainMapComponent = ({
                 return map ? { width: map.getCanvas().width, height: map.getCanvas().height } : null;
             }
         );
+        // Continuous, for the interchange's screen-space spacing.
+        setExactZoom(e.viewState.zoom);
         // Quantise: markers only care about whole zoom steps, so this re-renders
         // ~once per zoom level instead of once per animation frame.
         setZoomLevel((prev) => {
@@ -733,11 +770,6 @@ const MainMapComponent = ({
             if (map.hasImage?.(id)) continue;
             map.addImage(id, makeDotImage(spec), { pixelRatio: 2 });
         }
-        if (!map.hasImage?.("interchange-pin")) {
-            map.addImage("interchange-pin", makeCompactInterchangeImage(), {
-                pixelRatio: 2,
-            });
-        }
     }, []);
 
     /** Both style-level fixups, for `onLoad` and `onStyleData`. */
@@ -776,13 +808,20 @@ const MainMapComponent = ({
                 return [point.x, point.y] as [number, number];
             });
             if (projected.some((point) => !point)) return points;
-            const visible = projectedInterchangeEndpoints(projected as [number, number][]);
+            // Scale the gap with the continuous zoom, not the floored one:
+            // a floored value keeps the previous level's spacing until the
+            // camera crosses an integer, which made the marker lag and drift
+            // off its line while zooming in.
+            const visible = projectedInterchangeEndpoints(
+                projected as [number, number][],
+                interchangeSeparationPx(exactZoom)
+            );
             return visible.map((point) => {
                 const map = mapRef.current?.getMap?.();
                 return map ? [map.unproject([point[0], point[1]]).lng, map.unproject([point[0], point[1]]).lat] : points[0];
             });
         }),
-        [activeInterchanges, mapPixels, zoomLevel]
+        [activeInterchanges, mapPixels, exactZoom]
     );
     const visibleInterchanges =
         mode === "krl" && activeInterchanges.length > 0;
@@ -935,10 +974,12 @@ const MainMapComponent = ({
             // Clicking a GPU circle layer: hit-test by layer id, since these
             // are painted pixels rather than DOM nodes with their own handlers.
             interactiveLayerIds={[
+                // Interchanges are always drawn as the real connector pill; the
+                // two platforms are held at least
+                // `INTERCHANGE_MIN_SEPARATION_PX` apart at every zoom, so they
+                // stay distinguishable without a separate far-out symbol.
                 ...(interchangeGeo.pills.features.length
-                    ? visibleInterchanges
-                        ? ["interchange-hit", "interchange-endpoint", "interchange-label"]
-                        : ["interchange-compact"]
+                    ? ["interchange-hit", "interchange-endpoint", "interchange-label"]
                     : []),
                 ...(routeClusters.length ? ["route-stop-pin"] : []),
                 ...(showAllStops && allStops && zoomLevel >= allStopsZoom
@@ -1250,68 +1291,67 @@ const MainMapComponent = ({
             {interchangeGeo.pills.features.length > 0 && (
                 <>
                     <Source id="interchange-pill" type="geojson" data={interchangeGeo.pills}>
+                        {/*
+                          The connector reads as part of the stop symbol
+                          family, and matches an ordinary dot exactly: a 12s
+                          outline over an 8s body leaves a 2s ring, the same
+                          proportions as `all-stop-dot` (12px circle, 2px
+                          stroke) at every zoom.
+
+                          The body is the app's `bg-jakarta` navy -- the same
+                          `STOP_INK` an ordinary dot uses -- so the bridge reads
+                          as part of the stop symbol family rather than a
+                          separate colour.
+                        */}
                         <Layer
                             id="interchange-outline"
                             type="line"
+                            minzoom={allStopsZoom}
                             layout={{
                                 visibility: visibleInterchanges ? "visible" : "none",
                                 "line-cap": "round",
                                 "line-join": "round",
                             }}
-                            paint={{ "line-color": "#0C1B2A", "line-width": 16 }}
+                            paint={{ "line-color": STOP_RING, "line-width": stationDotSize() }}
                         />
                         <Layer
                             id="interchange-fill"
                             type="line"
+                            minzoom={allStopsZoom}
                             layout={{
                                 visibility: visibleInterchanges ? "visible" : "none",
                                 "line-cap": "round",
                                 "line-join": "round",
                             }}
-                            paint={{ "line-color": "#FFFFFF", "line-width": 11 }}
+                            paint={{ "line-color": STOP_INK, "line-width": stationDotSize(0, 8 / 12) }}
                         />
                         <Layer
                             id="interchange-hit"
                             type="line"
+                            minzoom={allStopsZoom}
                             layout={{ visibility: visibleInterchanges ? "visible" : "none" }}
-                            paint={{ "line-color": "#FFFFFF", "line-width": 24, "line-opacity": 0.01 }}
+                            paint={{ "line-color": STOP_INK, "line-width": 24, "line-opacity": 0.01 }}
                         />
                     </Source>
                     <Source id="interchange-endpoints" type="geojson" data={interchangeGeo.endpoints}>
                         <Layer
                             id="interchange-endpoint"
                             type="circle"
+                            minzoom={allStopsZoom}
                             layout={{ visibility: visibleInterchanges ? "visible" : "none" }}
                             paint={{
-                                "circle-radius": 4.5,
+                                // Same ring proportion as a station dot: the dot
+                                // is 12s across with a 2s stroke, so radius 6s
+                                // and stroke 2s. A fixed 1.5px stroke thinned
+                                // out at low zoom and thickened at high zoom.
+                                "circle-radius": stationDotSize(0, 0.5),
                                 "circle-color": ["get", "color"],
-                                "circle-stroke-width": 1.5,
-                                "circle-stroke-color": "#FFFFFF",
+                                "circle-stroke-width": stationDotSize(0, 1 / 6),
+                                "circle-stroke-color": STOP_RING,
                             }}
                         />
                     </Source>
                     <Source id="interchange-label-source" type="geojson" data={interchangeGeo.labels}>
-                        <Layer
-                            id="interchange-compact"
-                            type="symbol"
-                            layout={{
-                                visibility: mode === "krl" && activeInterchanges.length > 0 &&
-                                    zoomLevel < interchangeZoom ? "visible" : "none",
-                                "icon-image": "interchange-pin",
-                                "icon-allow-overlap": true,
-                                "text-field": ["get", "name"],
-                                "text-font": LABEL_FONT,
-                                "text-size": 12,
-                                "text-variable-anchor": ["top", "bottom", "left", "right"],
-                                "text-radial-offset": 1.2,
-                                "text-optional": true,
-                            }}
-                            paint={{
-                                "text-color": "#0C1B2A",
-                                "text-halo-color": "#FFFFFF",
-                                "text-halo-width": 2,
-                            }}
-                        />
                         <Layer
                             id="interchange-label"
                             type="symbol"
@@ -1322,7 +1362,10 @@ const MainMapComponent = ({
                                 "text-font": LABEL_FONT,
                                 "text-size": 12,
                                 "text-variable-anchor": ["top", "bottom", "left", "right"],
-                                "text-radial-offset": 1.2,
+                                // Tighter than before (1.2) because the
+                                // connector shrank; at 1.2 the label floated
+                                // ~9px clear of the pill.
+                                "text-radial-offset": 0.9,
                                 "text-allow-overlap": false,
                                 "symbol-sort-key": ["-", 0, ["get", "routes"]],
                             }}
@@ -1341,13 +1384,13 @@ const MainMapComponent = ({
                     clusters={routeClusters.filter((cluster) => {
                         const group = activeInterchanges.find((g) => g.name === cluster.name);
                         if (!group) return true;
-                        // Keep only a C-position pin when the pill is hidden.
-                        // This prevents the representative TP coordinate from
-                        // looking like the whole station and covering the C track.
+                        // The connector pill represents the whole station, so
+                        // the representative pin that sits on one of its
+                        // anchors would only double-draw that platform.
                         return !group.anchors.some((anchor) =>
                             Math.abs(anchor.lat - cluster.stop.stop_lat) < 1e-6 &&
                             Math.abs(anchor.lon - cluster.stop.stop_lon) < 1e-6
-                        ) || (!visibleInterchanges && cluster.stop.stop_id === "C07");
+                        );
                     })}
                     // The card-focused stop is highlighted like a selected one,
                     // but without the popup.

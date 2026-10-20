@@ -13,6 +13,35 @@ export interface Interchange {
  * Give each track its own visible endpoint while preserving physical lat/lon
  * in the data and returning to geographic alignment as the map zooms in. */
 export const INTERCHANGE_MIN_SEPARATION_PX = 26;
+
+/**
+ * Diameter of an ordinary station dot at a given zoom.
+ *
+ * Mirrors the `icon-size` ramp the map uses for `all-stop-dot`
+ * (r5 + 2px stroke, scaled 0.62 at z12 to 1.25 at z17), which works out to
+ * 7.44px and 15px across. Kept here so the interchange can size itself
+ * against a normal stop instead of using a fixed number.
+ */
+export const stationDotDiameter = (zoom: number): number => {
+    const z = Math.min(17, Math.max(12, zoom));
+    return 7.44 + ((15 - 7.44) * (z - 12)) / (17 - 12);
+};
+
+/**
+ * How far apart to draw an interchange's two platforms, in screen pixels.
+ *
+ * Proportional to the station dot, not fixed. A flat 26px looked fine next to
+ * nothing, but at z12 it forced the platforms ~26px apart when their real
+ * separation projects to about 1.4px -- the connector grew to roughly five
+ * times a station dot and its end pips floated well clear of the track they
+ * belong to. Scaling with the dot keeps the connector at a steady ~2.3x a
+ * normal stop at every zoom, and keeps the two pips just clear of each other
+ * (each pip is half a dot wide, so a gap of one dot is the minimum that
+ * avoids overlap).
+ */
+export const interchangeSeparationPx = (zoom: number): number =>
+    stationDotDiameter(zoom) * 1.15;
+
 export const projectedInterchangeEndpoints = (
     points: [number, number][],
     minPixels = INTERCHANGE_MIN_SEPARATION_PX
