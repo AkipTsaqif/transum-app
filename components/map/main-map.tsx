@@ -20,6 +20,7 @@ import type { FeatureCollection, Point } from "geojson";
 import { useTheme } from "next-themes";
 import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
 import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
+import { interchangeFeatures, interchangesFromStops, projectedInterchangeEndpoints } from "@/utils/interchange";
 
 /**
  * MapLibre v6 loads its tile-processing worker from a URL it derives from its
@@ -139,6 +140,31 @@ interface DotSpec {
     stroke: number;
     fill: string;
     ring: string;
+}
+
+/** Small schematic twin-platform badge for scales where the real track gap
+ * projects to less than a few pixels. At close zoom the actual endpoints
+ * replace it, each positioned on its own line. */
+function makeCompactInterchangeImage(): ImageData {
+    const c = document.createElement("canvas");
+    c.width = 68;
+    c.height = 36;
+    const ctx = c.getContext("2d")!;
+    ctx.scale(2, 2);
+    ctx.fillStyle = "#FFFFFF";
+    ctx.strokeStyle = "#0C1B2A";
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.roundRect(1.5, 2, 31, 14, 7);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#0C1B2A";
+    for (const x of [10, 24]) {
+        ctx.beginPath();
+        ctx.arc(x, 9, 2.8, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    return ctx.getImageData(0, 0, c.width, c.height);
 }
 
 /**
@@ -586,6 +612,10 @@ const MainMapComponent = ({
     // (tens per route, clustered) -- show them as soon as a route is framed,
     // and keep labels for when the user is actually zoomed in.
     const zoomThreshold = 10;
+    // At the full-Cikarang fit the two 52m-apart platforms project less than
+    // one pixel apart. Show a compact transfer marker there; use the
+    // track-spanning pill only once the two endpoints can be distinguished.
+    const interchangeZoom = 13;
     // Auto-fit frames a trunk anywhere from z11.9 to z15.8 depending on how
     // long it is, so a high fixed gate hid labels on most routes right after
     // the camera settled. Collision placement already drops labels that will
@@ -617,8 +647,19 @@ const MainMapComponent = ({
     // fitBounds can animate freely. A controlled viewState would be re-applied
     // by React on every frame and fight the easing.
     const [zoomLevel, setZoomLevel] = useState(10);
+    // Map pixels. Update together with zoom because the fallback interchange
+    // endpoints are deliberately spaced in screen coordinates.
+    const [mapPixels, setMapPixels] = useState<
+        { width: number; height: number } | null
+    >(null);
 
     const handleMove = useCallback((e: { viewState: { zoom: number } }) => {
+        setMapPixels(
+            () => {
+                const map = mapRef.current?.getMap?.();
+                return map ? { width: map.getCanvas().width, height: map.getCanvas().height } : null;
+            }
+        );
         // Quantise: markers only care about whole zoom steps, so this re-renders
         // ~once per zoom level instead of once per animation frame.
         setZoomLevel((prev) => {
@@ -658,6 +699,7 @@ const MainMapComponent = ({
             ...order.filter((id) => id === "overview-line"),
             ...order.filter((id) => id.startsWith("shape-line")),
             ...order.filter((id) => id.startsWith("all-stops-")),
+            ...order.filter((id) => id.startsWith("interchange-")),
             ...order.filter((id) => id === "route-stop-pin"),
         ];
         if (desired.length < 2) return;
@@ -691,6 +733,11 @@ const MainMapComponent = ({
             if (map.hasImage?.(id)) continue;
             map.addImage(id, makeDotImage(spec), { pixelRatio: 2 });
         }
+        if (!map.hasImage?.("interchange-pin")) {
+            map.addImage("interchange-pin", makeCompactInterchangeImage(), {
+                pixelRatio: 2,
+            });
+        }
     }, []);
 
     /** Both style-level fixups, for `onLoad` and `onStyleData`. */
@@ -703,6 +750,54 @@ const MainMapComponent = ({
     const routeClusters = useMemo(
         () => clusterStops(routeStops, nearbyThreshold),
         [routeStops, nearbyThreshold]
+    );
+    // Physical platforms are separate anchors; only their label and the
+    // station detail are shared. Derive this from baked station metadata, not
+    // by guessing that any nearby pair of stops must be an interchange.
+    const interchangeGroups = useMemo(
+        () => mode === "krl" ? interchangesFromStops(allStops) : [],
+        [mode, allStops]
+    );
+    const activeInterchanges = useMemo(() => {
+        if (showAllStops) return interchangeGroups;
+        const names = new Set(routeStops.map((stop) => removeOppStopPrefix(stop.stop_name)));
+        return interchangeGroups.filter((group) => names.has(group.name));
+    }, [showAllStops, interchangeGroups, routeStops]);
+    const interchangeGeo = useMemo(
+        () => interchangeFeatures(activeInterchanges, (_group, points) => {
+            if (!mapPixels) return points;
+            // Only the DISPLAY of two platforms is separated at far-out zooms.
+            // Data stays geographic; this converges to the exact anchors as
+            // their real screen distance grows.
+            const projected = points.map(([lon, lat]) => {
+                const map = mapRef.current?.getMap?.();
+                if (!map) return null;
+                const point = map.project([lon, lat]);
+                return [point.x, point.y] as [number, number];
+            });
+            if (projected.some((point) => !point)) return points;
+            const visible = projectedInterchangeEndpoints(projected as [number, number][]);
+            return visible.map((point) => {
+                const map = mapRef.current?.getMap?.();
+                return map ? [map.unproject([point[0], point[1]]).lng, map.unproject([point[0], point[1]]).lat] : points[0];
+            });
+        }),
+        [activeInterchanges, mapPixels, zoomLevel]
+    );
+    const visibleInterchanges =
+        mode === "krl" && activeInterchanges.length > 0;
+    const interchangeNames = useMemo(
+        () => new Set(interchangeGroups.map((g) => g.name)),
+        [interchangeGroups]
+    );
+    const ordinaryStops = useMemo<FeatureCollection>(
+        () => ({
+            type: "FeatureCollection",
+            features: (allStops?.features ?? []).filter(
+                (feature) => !interchangeNames.has(String(feature.properties?.name ?? ""))
+            ),
+        }),
+        [allStops, interchangeNames]
     );
 
     /**
@@ -840,13 +935,18 @@ const MainMapComponent = ({
             // Clicking a GPU circle layer: hit-test by layer id, since these
             // are painted pixels rather than DOM nodes with their own handlers.
             interactiveLayerIds={[
+                ...(interchangeGeo.pills.features.length
+                    ? visibleInterchanges
+                        ? ["interchange-hit", "interchange-endpoint", "interchange-label"]
+                        : ["interchange-compact"]
+                    : []),
                 ...(routeClusters.length ? ["route-stop-pin"] : []),
                 ...(showAllStops && allStops && zoomLevel >= allStopsZoom
                     ? ["all-stops-circle"]
                     : []),
             ]}
             onClick={(e) => {
-                const f = e.features?.[0];
+                const f = e.features?.find((feature) => feature.layer.id.startsWith("interchange-")) ?? e.features?.[0];
 
                 // Nothing under the cursor: treat it as "dismiss".
                 //
@@ -858,6 +958,19 @@ const MainMapComponent = ({
                 // selection by accident.
                 if (!f) {
                     onBackgroundClick?.();
+                    return;
+                }
+
+                // A pill, either endpoint, and its single label all resolve
+                // to the same station. Use the clicked coordinate so the
+                // popup opens by the touched platform, not at a midpoint.
+                if (f.layer?.id?.startsWith("interchange-")) {
+                    const id = String(f.properties?.stationId ?? "");
+                    const group = activeInterchanges.find((g) => g.id === id);
+                    if (group) {
+                        setStopFocusRequest((n) => n + 1);
+                        onStationClick?.(group.name, e.lngLat.lat, e.lngLat.lng);
+                    }
                     return;
                 }
 
@@ -890,7 +1003,8 @@ const MainMapComponent = ({
                 const f = e.features?.[0];
                 const id = f?.layer?.id;
                 const name =
-                    id === "all-stops-circle" || id === "route-stop-pin"
+                    id === "all-stops-circle" || id === "route-stop-pin" ||
+                    id?.startsWith("interchange-")
                         ? String(f?.properties?.name ?? "")
                         : null;
                 // Only re-render when the hovered stop actually changes;
@@ -1041,7 +1155,7 @@ const MainMapComponent = ({
               6,437 React components plus an O(n^2) clustering pass.
             */}
             {allStops && (
-                <Source id="all-stops" type="geojson" data={allStops}>
+                <Source id="all-stops" type="geojson" data={ordinaryStops}>
                     {/*
                       Dot and label are one symbol here too, for the same
                       reason as the route stops: a circle layer is invisible to
@@ -1133,9 +1247,108 @@ const MainMapComponent = ({
                 </Source>
             )}
 
+            {interchangeGeo.pills.features.length > 0 && (
+                <>
+                    <Source id="interchange-pill" type="geojson" data={interchangeGeo.pills}>
+                        <Layer
+                            id="interchange-outline"
+                            type="line"
+                            layout={{
+                                visibility: visibleInterchanges ? "visible" : "none",
+                                "line-cap": "round",
+                                "line-join": "round",
+                            }}
+                            paint={{ "line-color": "#0C1B2A", "line-width": 16 }}
+                        />
+                        <Layer
+                            id="interchange-fill"
+                            type="line"
+                            layout={{
+                                visibility: visibleInterchanges ? "visible" : "none",
+                                "line-cap": "round",
+                                "line-join": "round",
+                            }}
+                            paint={{ "line-color": "#FFFFFF", "line-width": 11 }}
+                        />
+                        <Layer
+                            id="interchange-hit"
+                            type="line"
+                            layout={{ visibility: visibleInterchanges ? "visible" : "none" }}
+                            paint={{ "line-color": "#FFFFFF", "line-width": 24, "line-opacity": 0.01 }}
+                        />
+                    </Source>
+                    <Source id="interchange-endpoints" type="geojson" data={interchangeGeo.endpoints}>
+                        <Layer
+                            id="interchange-endpoint"
+                            type="circle"
+                            layout={{ visibility: visibleInterchanges ? "visible" : "none" }}
+                            paint={{
+                                "circle-radius": 4.5,
+                                "circle-color": ["get", "color"],
+                                "circle-stroke-width": 1.5,
+                                "circle-stroke-color": "#FFFFFF",
+                            }}
+                        />
+                    </Source>
+                    <Source id="interchange-label-source" type="geojson" data={interchangeGeo.labels}>
+                        <Layer
+                            id="interchange-compact"
+                            type="symbol"
+                            layout={{
+                                visibility: mode === "krl" && activeInterchanges.length > 0 &&
+                                    zoomLevel < interchangeZoom ? "visible" : "none",
+                                "icon-image": "interchange-pin",
+                                "icon-allow-overlap": true,
+                                "text-field": ["get", "name"],
+                                "text-font": LABEL_FONT,
+                                "text-size": 12,
+                                "text-variable-anchor": ["top", "bottom", "left", "right"],
+                                "text-radial-offset": 1.2,
+                                "text-optional": true,
+                            }}
+                            paint={{
+                                "text-color": "#0C1B2A",
+                                "text-halo-color": "#FFFFFF",
+                                "text-halo-width": 2,
+                            }}
+                        />
+                        <Layer
+                            id="interchange-label"
+                            type="symbol"
+                            minzoom={showAllStops ? 14 : 0}
+                            layout={{
+                                visibility: visibleInterchanges ? "visible" : "none",
+                                "text-field": ["get", "name"],
+                                "text-font": LABEL_FONT,
+                                "text-size": 12,
+                                "text-variable-anchor": ["top", "bottom", "left", "right"],
+                                "text-radial-offset": 1.2,
+                                "text-allow-overlap": false,
+                                "symbol-sort-key": ["-", 0, ["get", "routes"]],
+                            }}
+                            paint={{
+                                "text-color": "#0C1B2A",
+                                "text-halo-color": "#FFFFFF",
+                                "text-halo-width": 2,
+                            }}
+                        />
+                    </Source>
+                </>
+            )}
+
             {(forcePins || zoomLevel > zoomThreshold) && routeClusters.length > 0 && (
                 <StopMarkers
-                    clusters={routeClusters}
+                    clusters={routeClusters.filter((cluster) => {
+                        const group = activeInterchanges.find((g) => g.name === cluster.name);
+                        if (!group) return true;
+                        // Keep only a C-position pin when the pill is hidden.
+                        // This prevents the representative TP coordinate from
+                        // looking like the whole station and covering the C track.
+                        return !group.anchors.some((anchor) =>
+                            Math.abs(anchor.lat - cluster.stop.stop_lat) < 1e-6 &&
+                            Math.abs(anchor.lon - cluster.stop.stop_lon) < 1e-6
+                        ) || (!visibleInterchanges && cluster.stop.stop_id === "C07");
+                    })}
                     // The card-focused stop is highlighted like a selected one,
                     // but without the popup.
                     activeName={activeStop?.name ?? focusPoint?.name ?? null}

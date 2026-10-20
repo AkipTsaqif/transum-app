@@ -106,6 +106,9 @@ export default function Index() {
     const [variantTripId, setVariantTripId] = useState<string | null>(null);
 
     const [station, setStation] = useState<StationDetail | null>(null);
+    // A multi-track interchange resolves to one station, but its popup must
+    // open beside the platform the user actually clicked.
+    const [stationAnchor, setStationAnchor] = useState<{ lat: number; lon: number } | null>(null);
     const [stationLoading, setStationLoading] = useState(false);
     const [stationError, setStationError] = useState<string | null>(null);
     const [stationRoutes, setStationRoutes] = useState<RouteDetail[]>([]);
@@ -157,6 +160,7 @@ export default function Index() {
             hoverCache.current.clear();
             setFocusStop(null);
             setStation(null);
+            setStationAnchor(null);
             setStationRoutes([]);
             setStationError(null);
             setStationLoading(false);
@@ -346,6 +350,16 @@ export default function Index() {
             if (ctrl.signal.aborted) return;
 
             setStation(detail);
+            if (mode === "krl" && detail.anchors?.length) {
+                const closest = [...detail.anchors].sort(
+                    (a, b) =>
+                        Math.hypot(a.lat - stop.stop_lat, a.lon - stop.stop_lon) -
+                        Math.hypot(b.lat - stop.stop_lat, b.lon - stop.stop_lon)
+                )[0];
+                setStationAnchor({ lat: closest.lat, lon: closest.lon });
+            } else {
+                setStationAnchor(null);
+            }
         } catch (err) {
             if ((err as Error).name === "AbortError") return;
             console.error("Failed to load stop:", err);
@@ -424,6 +438,14 @@ export default function Index() {
         })();
     }, [mode]);
 
+    // KRL has only 30 stations. Fetch its tiny station layer immediately so
+    // an interchange selected from the route list is already available as a
+    // two-platform pill, even if the idle map was never zoomed to level 12.
+    // Leave Transjakarta's 6,437-stop layer lazy.
+    useEffect(() => {
+        if (mode === "krl") loadAllStops();
+    }, [mode, loadAllStops]);
+
     /**
      * Resolve a station clicked on the GPU stop layer. Same path as a marker
      * click, but the layer only carries name + coordinates.
@@ -444,6 +466,7 @@ export default function Index() {
     const clearStation = useCallback(() => {
         stationAbortRef.current?.abort();
         setStation(null);
+        setStationAnchor(null);
         setStationRoutes([]);
         setStationError(null);
         setStationLoading(false);
@@ -1059,8 +1082,8 @@ export default function Index() {
                     activeStop={
                         station
                             ? {
-                                  lat: station.lat,
-                                  lon: station.lon,
+                                  lat: stationAnchor?.lat ?? station.lat,
+                                  lon: stationAnchor?.lon ?? station.lon,
                                   name: station.name,
                               }
                             : null

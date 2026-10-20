@@ -108,6 +108,7 @@ async function expand(
         lat: station.lat,
         lon: station.lon,
         platforms: station.platforms,
+        ...(station.anchors ? { anchors: station.anchors } : {}),
         routes: station.routes
             .map((id): StationRoute | undefined => {
                 const r = byId.get(id);
@@ -171,7 +172,12 @@ export async function resolveStation(
 
     for (const s of stations.values()) {
         if (s.name !== name) continue;
-        const d = haversine(lat, lon, s.lat, s.lon);
+        const d = Math.min(
+            haversine(lat, lon, s.lat, s.lon),
+            ...(s.anchors ?? []).map((anchor) =>
+                haversine(lat, lon, anchor.lat, anchor.lon)
+            )
+        );
         if (d < bestDist) {
             bestDist = d;
             best = s;

@@ -509,18 +509,23 @@ interface AggregateStation {
     count: number;
     routes: Set<string>;
     positions: Record<string, [number, number]>;
+    anchors: { routeId: string; stopId: string; lat: number; lon: number; color: string }[];
 }
 
 function addToStationIndex(
     aggregate: AggregateStation[],
     routeId: string,
+    color: string,
     stops: RouteStation[]
 ) {
     for (const stop of stops) {
         const hit = aggregate.find(
             (candidate) =>
                 nameKey(candidate.name) === nameKey(stop.name) &&
-                metres([candidate.lon, candidate.lat], [stop.lon, stop.lat]) <= CLUSTER_M
+                candidate.anchors.some(
+                    (anchor) =>
+                        metres([anchor.lon, anchor.lat], [stop.lon, stop.lat]) <= CLUSTER_M
+                )
         );
         if (hit) {
             // Keep the first line's snapped marker, rather than averaging
@@ -530,6 +535,13 @@ function addToStationIndex(
             hit.count++;
             hit.routes.add(routeId);
             hit.positions[routeId] ??= [stop.sequence, stops.length];
+            hit.anchors.push({
+                routeId,
+                stopId: stop.id,
+                lat: stop.lat,
+                lon: stop.lon,
+                color: `#${color}`,
+            });
         } else {
             aggregate.push({
                 name: stop.name,
@@ -538,6 +550,13 @@ function addToStationIndex(
                 count: 1,
                 routes: new Set([routeId]),
                 positions: { [routeId]: [stop.sequence, stops.length] },
+                anchors: [{
+                    routeId,
+                    stopId: stop.id,
+                    lat: stop.lat,
+                    lon: stop.lon,
+                    color: `#${color}`,
+                }],
             });
         }
     }
@@ -643,7 +662,7 @@ async function main() {
             route_color: cfg.color,
             route_text_color: "FFFFFF",
         });
-        addToStationIndex(stationAggregate, cfg.id, routeStops);
+        addToStationIndex(stationAggregate, cfg.id, cfg.color, routeStops);
 
         // TP uses one shared corridor. C has two complete full-racket shapes,
         // both of which belong in the city-wide overview by default.
@@ -674,6 +693,13 @@ async function main() {
         platforms: 1,
         routes: [...station.routes].sort(),
         positions: station.positions,
+        ...(station.anchors.length > 1
+            ? { anchors: station.anchors.map((anchor) => ({
+                  ...anchor,
+                  lat: round(anchor.lat),
+                  lon: round(anchor.lon),
+              })) }
+            : {}),
     }));
     outputFiles.set("routes.json", routeIndex);
     outputFiles.set("stops.json", stationIndex);
@@ -681,7 +707,12 @@ async function main() {
         type: "FeatureCollection",
         features: stationIndex.map((station) => ({
             type: "Feature",
-            properties: { name: station.name, routes: station.routes.length },
+            properties: {
+                name: station.name,
+                routes: station.routes.length,
+                stationId: station.id,
+                ...(station.anchors ? { anchors: station.anchors } : {}),
+            },
             geometry: { type: "Point", coordinates: [station.lon, station.lat] },
         })),
     });

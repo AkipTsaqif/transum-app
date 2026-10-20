@@ -65,4 +65,10 @@ test("TP directionality and shared interchange remain intact", () => {
     const tpStop = tp.stops.find((s) => s.stop_id === "TP02")!;
     assert.equal(shared[0].lat, tpStop.stop_lat);
     assert.equal(shared[0].lon, tpStop.stop_lon);
+    assert.deepEqual(shared[0].anchors?.map((anchor) => anchor.routeId), ["TP", "C"]);
+    const cStop = c.stops.find((s) => s.stop_id === "C07")!;
+    assert.deepEqual(shared[0].anchors?.map((anchor) => [anchor.stopId, anchor.lat, anchor.lon]), [
+        ["TP02", tpStop.stop_lat, tpStop.stop_lon],
+        ["C07", cStop.stop_lat, cStop.stop_lon],
+    ]);
 });
