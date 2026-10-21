@@ -40,10 +40,10 @@ import { useMediaQuery } from "@/hooks/use-media-query";
 import type { TransitMode } from "@/lib/gtfs";
 
 /** What the mode picker offers. `ready: false` entries are listed but off. */
-const MODES: { value: TransitMode | "mrt"; label: string; ready: boolean }[] = [
+const MODES: { value: TransitMode; label: string; ready: boolean }[] = [
     { value: "gtfs", label: "Transjakarta", ready: true },
     { value: "krl", label: "KRL Commuter Line", ready: true },
-    { value: "mrt", label: "MRT Jakarta", ready: false },
+    { value: "mrt", label: "MRT Jakarta", ready: true },
 ];
 /**
  * Baked data is served with an hour-long browser cache in production, which is
@@ -458,11 +458,11 @@ export default function Index() {
         })();
     }, [mode]);
 
-    // KRL has only a few dozen stations. Fetch its small station layer
-    // immediately so interchanges are available at the default map zoom.
+    // Rail networks have few stations. Fetch their small station layers
+    // immediately so the default overview includes the stops.
     // Leave Transjakarta's 6,437-stop layer lazy.
     useEffect(() => {
-        if (mode === "krl") loadAllStops();
+        if (mode !== "gtfs") loadAllStops();
     }, [mode, loadAllStops]);
 
     /**
@@ -848,7 +848,7 @@ export default function Index() {
                     <Select
                         value={mode}
                         onValueChange={(val) => {
-                            if (val === "gtfs" || val === "krl") switchMode(val);
+                            if (val === "gtfs" || val === "krl" || val === "mrt") switchMode(val);
                         }}
                     >
                         <SelectTrigger className="w-full border-white/20 bg-white/10 text-white [&>svg]:opacity-70">
