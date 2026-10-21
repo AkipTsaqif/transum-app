@@ -19,6 +19,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { FeatureCollection, Point } from "geojson";
 import { useTheme } from "next-themes";
 import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
+import type { TransitMode } from "@/lib/gtfs";
 import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
 import {
     interchangeFeatures,
@@ -98,18 +99,20 @@ const LABEL_FONT = ["PT Sans Narrow Bold"];
  * hence "diolah": stops are merged into stations and trips are classified
  * into patterns here, neither of which is in the original feed.
  *
- * krl: line geometry and stations come from OpenStreetMap contributors
+ * krl/mrt: line geometry and stations come from OpenStreetMap contributors
  * (ODbL), also processed here.
  *
  * The basemap's own credits (OpenFreeMap, OpenMapTiles, OpenStreetMap) are
  * added automatically from the tile source, so they are not repeated here.
  */
-const ATTRIBUTION: Record<"gtfs" | "krl", string> = {
+const ATTRIBUTION: Record<TransitMode, string> = {
     gtfs:
         'Data rute \u00a9 <a href="https://ppid.transjakarta.co.id/informasi/berkala" target="_blank" rel="noopener noreferrer">PT Transportasi Jakarta</a>, ' +
         '<a href="https://creativecommons.org/licenses/by/4.0/deed.id" target="_blank" rel="noopener noreferrer">CC BY 4.0</a> \u00b7 diolah',
     krl:
         'Data rute KRL \u00a9 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">kontributor OpenStreetMap</a> \u00b7 diolah',
+    mrt:
+        'Data rute MRT \u00a9 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">kontributor OpenStreetMap</a> \u00b7 diolah',
 };
 
 /**
@@ -251,7 +254,7 @@ interface MainMapComponentProps {
      */
     hideOverview?: boolean;
     /** Which dataset is shown; selects the data credit. */
-    mode?: "gtfs" | "krl";
+    mode?: TransitMode;
     /**
      * Pixels of map hidden under an overlay on the left (the floating route
      * card on wide screens). Added to fitBounds' left padding so a framed
@@ -660,29 +663,29 @@ const MainMapComponent = ({
     // and keep labels for when the user is actually zoomed in.
     // Fitting the whole KRL network (including Bogor) can settle around z9.
     // Keep Transjakarta's existing z10 route-pin gate unchanged.
-    const zoomThreshold = mode === "krl" ? 9 : 10;
+    const zoomThreshold = mode !== "gtfs" ? 9 : 10;
     // Auto-fit frames a trunk anywhere from z11.9 to z15.8 depending on how
     // long it is, so a high fixed gate hid labels on most routes right after
     // the camera settled. Collision placement already drops labels that will
     // not fit, so the gate only needs to stop the far-out view being noisy.
-    // KRL has ~80 stations, so its names can be read at the city-wide zoom a
-    // route fit settles on (z9.x with Bogor). Transjakarta's 6,437 names stay
+    // KRL and MRT have small station sets, so their names can be read at
+    // the city-wide zoom a route fit settles on. Transjakarta's 6,437 names stay
     // gated: at this zoom they are an unreadable, expensive smear.
-    const labelThreshold = mode === "krl" ? 9 : 11;
+    const labelThreshold = mode !== "gtfs" ? 9 : 11;
     const nearbyThreshold = 55;
     /**
      * Where the city-wide station dots begin. Transjakarta has 6,437 stops,
-     * which below z12 are an unreadable smear. The KRL network is ~80
-     * stations and always spans the whole region, so its stations show from
-     * the full-network fit (z9) -- the same floor as the route pins. GTFS
+     * which below z12 are an unreadable smear. KRL and MRT have far fewer
+     * stations, so they show from the full-network fit (z9) -- the same
+     * floor as the route pins. GTFS
      * keeps its separate z12 gate.
      */
-    const allStopsZoom = mode === "krl" ? zoomThreshold : 12;
+    const allStopsZoom = mode !== "gtfs" ? zoomThreshold : 12;
     /**
-     * Names for the city-wide dots. KRL shows them as soon as the dots appear
+     * Names for the city-wide dots. Rail modes show them when the dots appear
      * at z9; Transjakarta keeps the higher gate.
      */
-    const allStopsLabelZoom = mode === "krl" ? zoomThreshold : 14;
+    const allStopsLabelZoom = mode !== "gtfs" ? zoomThreshold : 14;
 
     const mapRef = useRef<MapRef | null>(null);
 
@@ -1314,12 +1317,12 @@ const MainMapComponent = ({
                             // Only the airport feature carries a signed screen-space
                             // offset. OSM coordinates and station anchors stay put.
                             "line-offset": ["coalesce", ["get", "lineOffset"], 0],
-                            // Match a selected route in KRL mode, even if an
+                            // Match selected routes in rail modes, even if an
                             // old cached overview has no opacity/width fields.
                             // Transjakarta's dense network remains faint.
-                            "line-opacity": mode === "krl" ? 1 : 0.35,
+                            "line-opacity": mode !== "gtfs" ? 1 : 0.35,
                             "line-width":
-                                mode === "krl"
+                                mode !== "gtfs"
                                     ? 3
                                     : [
                                           "interpolate",
