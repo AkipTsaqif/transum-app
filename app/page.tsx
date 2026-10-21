@@ -30,6 +30,8 @@ import type {
 import type { FeatureCollection } from "geojson";
 import { DualLine, SingleLine } from "@/components/route/route-line-diagram";
 import { dualDiagramFor, singleDiagramFor } from "@/utils/line-diagram";
+import { airportLineOffset } from "@/utils/krl-line-offset";
+import { airportDisplayFeatures } from "@/utils/krl-display";
 
 import { ArrowLeft, ChevronRight, MapPin, Route, X } from "lucide-react";
 import Link from "next/link";
@@ -456,9 +458,8 @@ export default function Index() {
         })();
     }, [mode]);
 
-    // KRL has only 30 stations. Fetch its tiny station layer immediately so
-    // an interchange selected from the route list is already available as a
-    // two-platform pill, even if the idle map was never zoomed to level 12.
+    // KRL has only a few dozen stations. Fetch its small station layer
+    // immediately so interchanges are available at the default map zoom.
     // Leave Transjakarta's 6,437-stop layer lazy.
     useEffect(() => {
         if (mode === "krl") loadAllStops();
@@ -507,6 +508,31 @@ export default function Index() {
         setDetailLoading(false);
     }, [clearStation]);
 
+    // Split the airport hairpin at Duri for display only: both sides terminate
+    // on the same passenger pip. Keep baked geometry and timetable unchanged.
+    const airportDisplay = useCallback((routeId: string, geometry: DrawnLayer["geometry"]) => {
+        if (mode !== "krl" || routeId !== "A") return geometry;
+        const airport = stationRoutes.find((r) => r.route_id === "A") ??
+            (detail?.route_id === "A" ? detail : null) ??
+            (hoverDetail?.route_id === "A" ? hoverDetail : null);
+        const duriStop = airport?.stops.find((stop) => stop.stop_name === "Duri");
+        const manggarai = allStops?.features.find((feature) => feature.properties?.name === "Manggarai");
+        const anchors = (manggarai?.properties?.anchors ?? []) as { routeId: string; lat: number; lon: number }[];
+        const bogor = anchors.find((a) => a.routeId === "B");
+        const cikarang = anchors.find((a) => a.routeId === "C");
+        const manggaraiStop = airport?.stops.find((stop) => stop.stop_name === "Manggarai");
+        const start: [number, number] | null = bogor && cikarang
+            ? [(bogor.lon + cikarang.lon) / 2, (bogor.lat + cikarang.lat) / 2]
+            : manggaraiStop ? [manggaraiStop.stop_lon, manggaraiStop.stop_lat] : null;
+        if (!duriStop || !start) return geometry;
+        return airportDisplayFeatures(
+            geometry,
+            [duriStop.stop_lon, duriStop.stop_lat],
+            start,
+            () => true
+        );
+    }, [mode, allStops, stationRoutes, detail, hoverDetail]);
+
     // What the map draws: the station's routes when a stop is open, otherwise
     // the selected route -- either its trunk patterns or one chosen variant.
     const layers: DrawnLayer[] = useMemo(() => {
@@ -529,18 +555,21 @@ export default function Index() {
                 return {
                     id: r.route_id,
                     color: r.route_color,
-                    geometry: {
+                    geometry: airportDisplay(r.route_id, {
                         type: "FeatureCollection" as const,
                         features: use
                             .map((coordinates) => ({
                                 type: "Feature" as const,
-                                properties: { shape_id: "" },
+                                properties: {
+                                    shape_id: "",
+                                    lineOffset: mode === "krl" ? airportLineOffset(r.route_id, coordinates) : 0,
+                                },
                                 geometry: {
                                     type: "LineString" as const,
                                     coordinates,
                                 },
                             })),
-                    },
+                    }),
                 };
             });
         }
@@ -565,7 +594,10 @@ export default function Index() {
         const features = lines
             .map((coordinates) => ({
                 type: "Feature" as const,
-                properties: { shape_id: "" },
+                properties: {
+                    shape_id: "",
+                    lineOffset: mode === "krl" ? airportLineOffset(detail.route_id, coordinates) : 0,
+                },
                 geometry: { type: "LineString" as const, coordinates },
             }));
 
@@ -576,7 +608,10 @@ export default function Index() {
                 .filter((c) => c?.length)
                 .map((coordinates) => ({
                     type: "Feature" as const,
-                    properties: { shape_id: "" },
+                    properties: {
+                        shape_id: "",
+                        lineOffset: mode === "krl" ? airportLineOffset(detail.route_id, coordinates) : 0,
+                    },
                     geometry: { type: "LineString" as const, coordinates },
                 }));
             if (!all.length) return [];
@@ -584,7 +619,7 @@ export default function Index() {
                 {
                     id: detail.route_id,
                     color: detail.route_color,
-                    geometry: { type: "FeatureCollection", features: all },
+                    geometry: airportDisplay(detail.route_id, { type: "FeatureCollection", features: all }),
                 },
             ];
         }
@@ -593,10 +628,10 @@ export default function Index() {
             {
                 id: `${detail.route_id}:${variantTripId ?? "utama"}`,
                 color: detail.route_color,
-                geometry: { type: "FeatureCollection", features },
+                geometry: airportDisplay(detail.route_id, { type: "FeatureCollection", features }),
             },
         ];
-    }, [stationExpanded, stationRoutes, detail, variantTripId]);
+    }, [stationExpanded, stationRoutes, detail, variantTripId, mode, airportDisplay]);
 
     // The hovered route's trunk line. Line only (no pins), and deliberately
     // separate from `layers`: the map frames `layers` and nothing else, so a
@@ -622,7 +657,10 @@ export default function Index() {
         const features = lines
             .map((coordinates) => ({
                 type: "Feature" as const,
-                properties: { shape_id: "" },
+                properties: {
+                    shape_id: "",
+                    lineOffset: mode === "krl" ? airportLineOffset(hoverDetail.route_id, coordinates) : 0,
+                },
                 geometry: { type: "LineString" as const, coordinates },
             }));
         if (!features.length) return null;
@@ -630,9 +668,9 @@ export default function Index() {
         return {
             id: hoverDetail.route_id,
             color: hoverDetail.route_color,
-            geometry: { type: "FeatureCollection", features },
+            geometry: airportDisplay(hoverDetail.route_id, { type: "FeatureCollection", features }),
         };
-    }, [stationExpanded, hoverDetail, hoverRouteId, detail]);
+    }, [stationExpanded, hoverDetail, hoverRouteId, detail, mode, airportDisplay]);
 
     // Stops shown as pins.
     const visibleStops: RouteStop[] = useMemo(() => {

@@ -11,6 +11,8 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { airportLineOffset } from "../utils/krl-line-offset";
+import { airportDisplayLine, airportManggaraiDisplayPoint } from "../utils/krl-display";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -27,6 +29,8 @@ interface LineConfig {
     canonicalByName?: Record<string, string>;
     /** One pair of main directions, then optional branch variants. */
     mainDirections?: number;
+    /** Passenger stops verified against the published KAI Commuter timetable. */
+    servedStations?: string[];
 }
 
 const C_STATIONS: Record<string, string> = {
@@ -89,6 +93,21 @@ const LINES: LineConfig[] = [
         canonicalByName: { "rawa buaya": "T06" },
     },
     {
+        id: "A",
+        short: "A",
+        // OSM airport line publishes #2e2f70; both directions share one service.
+        color: "2E2F70",
+        relations: [17675695, 17675694],
+        longName: "Manggarai - Bandara Soekarno-Hatta",
+        // KAI Commuter's timetable has six passenger stops. OSM also lists
+        // Sudirman as a stop member, though this service does not call there.
+        servedStations: ["Manggarai", "BNI City", "Duri", "Rawa Buaya", "Batu Ceper", "Bandara Soekarno 2"],
+        canonicalByName: {
+            manggarai: "A01", "bni city": "A02", duri: "A03",
+            "rawa buaya": "A04", "batu ceper": "A05", "bandara soekarno 2": "A06",
+        },
+    },
+    {
         id: "B",
         short: "B",
         // OSM route master 16877214 publishes #ec2329 for the Bogor line.
@@ -115,6 +134,8 @@ const STATION_BBOX = "-6.62,106.62,-6.10,107.17";
 const MAX_JOIN_GAP_M = 20;
 const STATION_MATCH_M = 1000;
 const CLUSTER_M = 150;
+// The airport terminal platform at Manggarai is ~174m from the KRL platforms.
+const MANGGARAI_CLUSTER_M = 200;
 const STOP_ROLES = new Set(["stop", "stop_entry_only", "stop_exit_only"]);
 
 // ---------------------------------------------------------------------------
@@ -282,7 +303,7 @@ function chainWays(
     });
 
     if (!preserveMemberOrder) {
-        // TP's relation members are not in travel order. Reconnect ways at
+        // Some relations' members are not in travel order. Reconnect ways at
         // either end, as the previous TP-only sync did, before orienting the
         // complete chain against its first and last relation stops.
         const pool = [...geometries];
@@ -500,16 +521,24 @@ function gather(
             lon: node.lon,
         };
     });
-    if (calls.length < 2) throw new Error(`Relation ${relation.id}: fewer than two stops`);
+    const served = cfg.servedStations && new Set(cfg.servedStations.map(nameKey));
+    const passengerCalls = served
+        ? calls.filter((call) => served.has(nameKey(call.name)))
+        : calls;
+    if (passengerCalls.length < 2) throw new Error(`Relation ${relation.id}: fewer than two stops`);
+    if (served && (passengerCalls.length !== served.size ||
+        new Set(passengerCalls.map((call) => nameKey(call.name))).size !== served.size)) {
+        throw new Error(`Relation ${relation.id}: missing or duplicated airport passenger stops`);
+    }
 
-    const endpointA = project(line, [calls[0].lon, calls[0].lat]).off;
-    const endpointZ = project(line, [calls.at(-1)!.lon, calls.at(-1)!.lat]).off;
+    const endpointA = project(line, [passengerCalls[0].lon, passengerCalls[0].lat]).off;
+    const endpointZ = project(line, [passengerCalls.at(-1)!.lon, passengerCalls.at(-1)!.lat]).off;
     if (endpointA > 250 || endpointZ > 250) {
         throw new Error(
             `Relation ${relation.id}: stop is ${Math.max(endpointA, endpointZ).toFixed(0)}m off chained track`
         );
     }
-    return { relation, line, calls };
+    return { relation, line, calls: passengerCalls };
 }
 
 function locate(
@@ -518,7 +547,10 @@ function locate(
     stationNodes: OsmNode[]
 ): { lat: number; lon: number; nodeId: number } {
     const here: LngLat = [station.lon, station.lat];
-    const key = nameKey(station.name);
+    // The OSM airport platform is "Bandara Soekarno 2", but the station
+    // marker and public name are "Bandara Soekarno-Hatta".
+    const key = nameKey(station.name) === "bandara soekarno 2"
+        ? "bandara soekarno hatta" : nameKey(station.name);
     const hit = stationNodes
         .filter((node) => nameKey(node.tags?.name ?? "") === key)
         .map((node) => ({ node, distance: metres(here, [node.lon, node.lat]) }))
@@ -546,7 +578,9 @@ function uniqueStations(directions: Direction[], cfg: LineConfig): RouteStation[
         }
     }
     const list = [...byId.values()].map(({ count: _count, ...station }) => station);
-    if (cfg.id === "C" || cfg.id === "B") {
+    if (cfg.id === "A") {
+        list.sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)));
+    } else if (cfg.id === "C" || cfg.id === "B") {
         // Branch stops are not on the Bogor trunk: keep them after the main
         // numbered stations instead of projecting them to a nearby trunk
         // segment, which interleaves Nambo between Depok and Citayam.
@@ -568,7 +602,10 @@ function uniqueStations(directions: Direction[], cfg: LineConfig): RouteStation[
 
 function routeVariant(cfg: LineConfig, direction: Direction, index: number) {
     const via = direction.relation.tags?.via ?? null;
-    const finalName = cfg.id === "C" ? "Cikarang" : direction.calls.at(-1)!.name;
+    const finalName = cfg.id === "C" ? "Cikarang" :
+        cfg.id === "A" && direction.calls.at(-1)!.id === "A06"
+            ? "Bandara Soekarno-Hatta"
+            : direction.calls.at(-1)!.name;
     return {
         trip_id: `${cfg.id}-${index}`,
         shape_id: `${cfg.id}-${index}`,
@@ -617,7 +654,9 @@ function addToStationIndex(
                 nameKey(candidate.name) === nameKey(stop.name) &&
                 candidate.anchors.some(
                     (anchor) =>
-                        metres([anchor.lon, anchor.lat], [stop.lon, stop.lat]) <= CLUSTER_M
+                        metres([anchor.lon, anchor.lat], [stop.lon, stop.lat]) <=
+                        (routeId === "A" && nameKey(stop.name) === "manggarai"
+                            ? MANGGARAI_CLUSTER_M : CLUSTER_M)
                 )
         );
         if (hit) {
@@ -730,6 +769,10 @@ async function main() {
             }));
         }
 
+        if (cfg.id === "A") {
+            const airport = routeStops.find((stop) => stop.id === "A06");
+            if (airport) airport.name = "Bandara Soekarno-Hatta";
+        }
         const longName = cfg.longName;
         const variants = directions.map((direction, index) => ({
             ...routeVariant(cfg, direction, index),
@@ -798,12 +841,35 @@ async function main() {
               ? [trimmedDirections[0], trimmedDirections[cfg.mainDirections]]
               : trimmedDirections.slice(0, 1);
         for (const direction of overviewDirections) {
-            overviewFeatures.push({
+            const duri = routeStops.find((stop) => stop.name === "Duri");
+            const manggarai = stationAggregate.find((station) => station.name === "Manggarai");
+            const bogorStop = cfg.id === "A"
+                ? [106.849688, -6.210358] as LngLat
+                : null;
+            const cikarangStop = manggarai?.anchors.find((anchor) => anchor.routeId === "C");
+            const manggaraiDisplay = bogorStop && cikarangStop
+                ? airportManggaraiDisplayPoint([
+                    { routeId: "B", lon: bogorStop[0], lat: bogorStop[1] },
+                    cikarangStop,
+                ])
+                : null;
+            const displayLines = cfg.id === "A" && duri && manggaraiDisplay
+                ? airportDisplayLine(direction.line,
+                    [duri.lon, duri.lat], manggaraiDisplay)
+                : [direction.line];
+            for (const displayLine of displayLines) overviewFeatures.push({
                 type: "Feature",
-                properties: { color: `#${cfg.color}`, opacity: 1, width: 3 },
+                properties: {
+                    color: `#${cfg.color}`,
+                    opacity: 1,
+                    width: 3,
+                    ...(cfg.id === "A"
+                        ? { lineOffset: airportLineOffset(cfg.id, direction.line) }
+                        : {}),
+                },
                 geometry: {
                     type: "LineString",
-                    coordinates: direction.line.map(([lon, lat]) => [round(lon), round(lat)]),
+                    coordinates: displayLine.map(([lon, lat]) => [round(lon), round(lat)]),
                 },
             });
         }
@@ -859,10 +925,8 @@ async function main() {
         deferredRelations: [15097496, 15097497, 15097498, 15097499, 15097500, 15097501, 15097502, 15097503, 15097504, 15097505, 15097506, 15097507],
     });
 
-    // Two physical interchanges are shared by different line pairs: Kampung
-    // Bandan (TP/C), Duri (C/T), and several Bogor-line interchanges share
-    // physical stations across lines. Validate those explicitly below rather
-    // than assuming a fixed global count when a new line is added.
+    // Interchanges can connect two or three lines. Validate known shared
+    // stations rather than assuming a fixed global count as lines are added.
     if (stationIndex.length < 60) {
         throw new Error(`Expected at least 60 physical KRL stations, got ${stationIndex.length}`);
     }
@@ -908,6 +972,20 @@ async function main() {
         bogor.variants[1].stopIds[0] !== "B26" ||
         bogor.variants[1].stopIds.at(-1) !== "B01"
     ) throw new Error("Bogor line must include both Bogor and Nambo branches");
+    const airport = outputFiles.get(path.join("routes", "A.json")) as {
+        stops: { stop_id: string; stop_name: string }[];
+        variants: { stopIds: string[]; headsign: string }[];
+    };
+    const airportIds = ["A01", "A02", "A03", "A04", "A05", "A06"];
+    if (!airport || airport.stops.length !== 6 || airport.variants.length !== 2 ||
+        airport.stops.map((stop) => stop.stop_id).join() !== airportIds.join() ||
+        airport.variants[0].stopIds.join() !== airportIds.join() ||
+        airport.variants[1].stopIds.join() !== [...airportIds].reverse().join() ||
+        airport.stops.at(-1)?.stop_name !== "Bandara Soekarno-Hatta" ||
+        stationIndex.filter((station) => station.routes.includes("A")).length !== 6 ||
+        stationIndex.filter((station) => station.name === "Manggarai" &&
+            station.routes.includes("A") && station.routes.includes("B") && station.routes.includes("C")).length !== 1
+    ) throw new Error("Airport line must serve six stops in both directions and share Manggarai");
     const senen = cRoute.variants.map((variant) => variant.stopIds.includes("C04"));
     if (senen[0] !== true || senen[1] !== false) {
         throw new Error("Pasar Senen must only be a stop on the via Pasar Senen racket");

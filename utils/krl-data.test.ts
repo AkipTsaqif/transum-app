@@ -9,6 +9,7 @@ const load = <T>(name: string): T =>
 const c = load<RouteDetail>("routes/C.json");
 const tp = load<RouteDetail>("routes/TP.json");
 const t = load<RouteDetail>("routes/T.json");
+const a = load<RouteDetail>("routes/A.json");
 const b = load<RouteDetail>("routes/B.json");
 const namboshapeEnd = (shape: [number, number][]) => shape.at(-1)!;
 const stations = load<StationIndexEntry[]>("stops.json");
@@ -41,7 +42,7 @@ test("C full rackets retain ordered repeated calls and one-way Pasar Senen", () 
 test("C overview includes both continuous racket shapes", () => {
     const meters = (a: [number, number], b: [number, number]) =>
         Math.hypot((a[0] - b[0]) * 110_700, (a[1] - b[1]) * 110_540);
-    assert.equal(overview.features.length, 6); // TP + both C rackets + T + B main/branch
+    assert.equal(overview.features.length, 8); // TP + both C rackets + T + two A segments + B main/branch
     for (const v of c.variants) {
         const shape = c.geometryByShape[v.shape_id];
         assert.ok(shape.length > 1000);
@@ -76,7 +77,7 @@ test("C overview includes both continuous racket shapes", () => {
 test("TP directionality and shared interchange remain intact", () => {
     assert.deepEqual(tp.variants[0].stopIds, ["TP01", "TP02", "TP03", "TP05"]);
     assert.deepEqual(tp.variants[1].stopIds, ["TP05", "TP04", "TP03", "TP02", "TP01"]);
-    assert.equal(stations.length, 64);
+    assert.equal(stations.length, 65);
     assert.equal(stations.filter((s) => s.routes.includes("C")).length, 26);
     const shared = stations.filter((s) => s.name === "Kampung Bandan");
     assert.equal(shared.length, 1);
@@ -108,11 +109,57 @@ test("Tangerang has eleven ordered stations each way and a shared Duri interchan
     }
     const duri = stations.filter((s) => s.name === "Duri");
     assert.equal(duri.length, 1);
-    assert.deepEqual(duri[0].routes, ["C", "T"]);
-    assert.deepEqual(duri[0].anchors?.map((anchor) => anchor.routeId), ["C", "T"]);
-    assert.deepEqual(duri[0].anchors?.map((anchor) => anchor.stopId), ["C09", "T01"]);
+    assert.deepEqual(duri[0].routes, ["A", "C", "T"]);
+    assert.deepEqual(duri[0].anchors?.map((anchor) => anchor.routeId), ["C", "T", "A"]);
+    assert.deepEqual(duri[0].anchors?.map((anchor) => anchor.stopId), ["C09", "T01", "A03"]);
     assert.equal(stations.filter((s) => s.routes.includes("T")).length, 11);
     assert.equal(overview.features.filter((f) => f.properties.color === "#C25F28").length, 1);
+});
+
+test("airport line has six served stops in both directions and a continuous airport track", () => {
+    assert.equal(a.route_id, "A");
+    assert.equal(a.route_color, "2E2F70");
+    assert.deepEqual(a.stops.map((stop) => stop.stop_name), [
+        "Manggarai", "BNI City", "Duri", "Rawa Buaya", "Batu Ceper", "Bandara Soekarno-Hatta",
+    ]);
+    assert.deepEqual(a.variants.map((v) => v.stopIds), [
+        a.stops.map((stop) => stop.stop_id),
+        a.stops.map((stop) => stop.stop_id).reverse(),
+    ]);
+    assert.deepEqual(a.variants.map((v) => v.headsign), ["Bandara Soekarno-Hatta", "Manggarai"]);
+    assert.ok(a.variants.every((v) => !v.stopIds.includes("C12")),
+        "Sudirman is an OSM stop member but is not a passenger call on the airport timetable");
+    for (const v of a.variants) {
+        assert.equal(v.headwaySecs, null);
+        assert.deepEqual(v.windows, []);
+        const shape = a.geometryByShape[v.shape_id];
+        assert.ok(shape.length > 100);
+        for (let i = 1; i < shape.length; i++) {
+            assert.ok(Math.hypot((shape[i][0] - shape[i - 1][0]) * 110_700,
+                (shape[i][1] - shape[i - 1][1]) * 110_540) < 1_200,
+                `${v.shape_id} jumped at ${i}`);
+        }
+        const first = a.stops.find((stop) => stop.stop_id === v.stopIds[0])!;
+        const last = a.stops.find((stop) => stop.stop_id === v.stopIds.at(-1))!;
+        for (const [point, stop] of [[shape[0], first], [shape.at(-1)!, last]] as const) {
+            assert.ok(Math.hypot((point[0] - stop.stop_lon) * 110_700,
+                (point[1] - stop.stop_lat) * 110_540) < 1,
+                `${v.shape_id} must end on ${stop.stop_name}`);
+        }
+    }
+    assert.equal(overview.features.filter((f) => f.properties.color === "#2E2F70").length, 2);
+    assert.deepEqual(stations.find((s) => s.name === "Manggarai")?.routes, ["A", "B", "C"]);
+    assert.deepEqual(stations.find((s) => s.name === "Duri")?.routes, ["A", "C", "T"]);
+    assert.deepEqual(stations.find((s) => s.name === "BNI City")?.routes, ["A", "C"]);
+    assert.deepEqual(stations.find((s) => s.name === "Rawa Buaya")?.routes, ["A", "T"]);
+    assert.deepEqual(stations.find((s) => s.name === "Batu Ceper")?.routes, ["A", "T"]);
+    for (const stop of a.stops) {
+        const station = stations.find((s) => s.name === stop.stop_name);
+        assert.ok(station && station.routes.includes("A"), `${stop.stop_name} must be in the searchable station index`);
+        assert.ok(station.anchors?.some((anchor) => anchor.routeId === "A" &&
+            anchor.stopId === stop.stop_id) || station.routes.length === 1,
+            `${stop.stop_name} must retain its airport-line platform`);
+    }
 });
 
 test("Bogor and Nambo branch reach their southern terminals", () => {
@@ -137,5 +184,5 @@ test("Bogor and Nambo branch reach their southern terminals", () => {
     const bounds = overview.features.flatMap((f) => f.geometry.coordinates);
     assert.ok(Math.min(...bounds.map((point) => point[1])) < bogor.stop_lat + 0.001);
     assert.deepEqual(stations.find((s) => s.name === "Jakarta Kota")?.routes, ["B", "TP"]);
-    assert.deepEqual(stations.find((s) => s.name === "Manggarai")?.routes, ["B", "C"]);
+    assert.deepEqual(stations.find((s) => s.name === "Manggarai")?.routes, ["A", "B", "C"]);
 });

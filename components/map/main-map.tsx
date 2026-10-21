@@ -26,6 +26,12 @@ import {
     interchangesFromStops,
     projectedInterchangeEndpoints,
 } from "@/utils/interchange";
+import { AIRPORT_LINE_OFFSET_PX } from "@/utils/krl-line-offset";
+import {
+    airportManggaraiDisplayPoint,
+    airportTerminalScreenPoint,
+    manggaraiDisplayPlatforms,
+} from "@/utils/krl-display";
 
 /**
  * MapLibre v6 loads its tile-processing worker from a URL it derives from its
@@ -767,6 +773,7 @@ const MainMapComponent = ({
         const desired = [
             ...order.filter((id) => id === "overview-line"),
             ...order.filter((id) => id.startsWith("shape-line")),
+            ...order.filter((id) => id === "airport-station-join-line"),
             ...order.filter((id) => id.startsWith("all-stops-")),
             ...order.filter((id) => id.startsWith("interchange-")),
             ...order.filter((id) => id === "route-stop-pin"),
@@ -828,29 +835,35 @@ const MainMapComponent = ({
         return interchangeGroups.filter((group) => names.has(group.name));
     }, [showAllStops, interchangeGroups, routeStops]);
     const interchangeGeo = useMemo(
-        () => interchangeFeatures(activeInterchanges, (_group, points) => {
+        () => interchangeFeatures(activeInterchanges, (group, points) => {
             if (!mapPixels) return points;
+            const map = mapRef.current?.getMap?.();
+            if (!map) return points;
+            const airportIndex = group.anchors.findIndex((a) => a.routeId === "A");
+            const manggarai = group.name === "Manggarai"
+                ? airportManggaraiDisplayPoint(group.anchors)
+                : null;
+            const schematic = points.map((point, index) =>
+                index === airportIndex && manggarai ? manggarai : point
+            );
             // Only the DISPLAY of two platforms is separated at far-out zooms.
             // Data stays geographic; this converges to the exact anchors as
             // their real screen distance grows.
-            const projected = points.map(([lon, lat]) => {
-                const map = mapRef.current?.getMap?.();
-                if (!map) return null;
+            const projected = schematic.map(([lon, lat]) => {
                 const point = map.project([lon, lat]);
                 return [point.x, point.y] as [number, number];
             });
-            if (projected.some((point) => !point)) return points;
             // Scale the gap with the continuous zoom, not the floored one:
             // a floored value keeps the previous level's spacing until the
             // camera crosses an integer, which made the marker lag and drift
             // off its line while zooming in.
-            const visible = projectedInterchangeEndpoints(
-                projected as [number, number][],
-                interchangeSeparationPx(exactZoom)
-            );
+            const gap = interchangeSeparationPx(exactZoom);
+            const visible = manggarai
+                ? manggaraiDisplayPlatforms(projected, group.anchors.map((a) => a.routeId), gap / 2)
+                : projectedInterchangeEndpoints(projected, gap);
             return visible.map((point) => {
-                const map = mapRef.current?.getMap?.();
-                return map ? [map.unproject([point[0], point[1]]).lng, map.unproject([point[0], point[1]]).lat] : points[0];
+                const lngLat = map.unproject(point);
+                return [lngLat.lng, lngLat.lat];
             });
         }),
         [activeInterchanges, mapPixels, exactZoom]
@@ -897,6 +910,105 @@ const MainMapComponent = ({
         }),
         [allStops, interchangeNames]
     );
+    // The airport terminal is not an interchange. Move only its DISPLAY dot
+    // and route pin to the line-offset endpoint; clicks still resolve to the
+    // original station coordinates stored in the all-stops feature properties.
+    const airportTerminal = useMemo(() => {
+        if (mode !== "krl" || !allStops || !mapPixels) return null;
+        const map = mapRef.current?.getMap?.();
+        const route = layers.find((layer) => layer.id === "A" || layer.id.startsWith("A:"))?.geometry.features.find(
+            (feature) => feature.geometry.coordinates.some(([lon]) => lon < 106.66)
+        );
+        const overviewRoute = overview?.features.find(
+            (feature) => (feature.properties as { color?: string } | null)?.color === "#2E2F70" &&
+                feature.geometry.coordinates.some(([lon]) => lon < 106.66)
+        );
+        const coordinates = (route ?? overviewRoute)?.geometry.coordinates as [number, number][] | undefined;
+        if (!map || !coordinates?.length || coordinates.length < 2) return null;
+        const airport = (allStops.features.find((feature) =>
+            feature.properties?.name === "Bandara Soekarno-Hatta"
+        )?.geometry as Point | undefined)?.coordinates;
+        if (!airport) return null;
+        const first = coordinates[0];
+        const last = coordinates.at(-1)!;
+        const terminalAtStart = Math.hypot(first[0] - airport[0], first[1] - airport[1]) <
+            Math.hypot(last[0] - airport[0], last[1] - airport[1]);
+        const end = terminalAtStart ? first : last;
+        const before = terminalAtStart ? coordinates[1] : coordinates.at(-2)!;
+        const offset = terminalAtStart ? -AIRPORT_LINE_OFFSET_PX : AIRPORT_LINE_OFFSET_PX;
+        const screen = airportTerminalScreenPoint(
+            [map.project(before).x, map.project(before).y],
+            [map.project(end).x, map.project(end).y],
+            offset
+        );
+        const point = map.unproject(screen);
+        return [point.lng, point.lat] as [number, number];
+    }, [mode, allStops, mapPixels, overview, layers, exactZoom]);
+    const displayStops = useMemo<FeatureCollection>(
+        () => !airportTerminal ? ordinaryStops : {
+            ...ordinaryStops,
+            features: ordinaryStops.features.map((feature) =>
+                feature.properties?.name === "Bandara Soekarno-Hatta"
+                    ? { ...feature, geometry: { type: "Point", coordinates: airportTerminal } }
+                    : feature
+            ),
+        },
+        [ordinaryStops, airportTerminal]
+    );
+    // An offset line stops 4px beside its raw endpoint. Join the two Duri
+    // approaches and the Manggarai end back to their displayed station pips.
+    // This affects pixels only; the route's geographic coordinates stay put.
+    const airportStationJoins = useMemo<FeatureCollection>(() => {
+        const empty: FeatureCollection = { type: "FeatureCollection", features: [] };
+        if (mode !== "krl" || !mapPixels) return empty;
+        const map = mapRef.current?.getMap?.();
+        if (!map) return empty;
+        const airport = layers.find((layer) => layer.id === "A" || layer.id.startsWith("A:"));
+        const features = airport?.geometry.features ??
+            (layers.length === 0 && previewLayer?.id === "A" ? previewLayer.geometry.features : null) ??
+            (layers.length === 0 && !previewLayer ? overview?.features.filter(
+                (feature) => (feature.properties as { color?: string } | null)?.color === "#2E2F70"
+            ) : null) ?? [];
+        const joinsVisible = !airport && !previewLayer ? !hideOverview : true;
+        if (!joinsVisible) return empty;
+        const pips = interchangeGeo.endpoints.features.filter((f) =>
+            f.properties?.routeId === "A" &&
+            (f.properties?.name === "Duri" || f.properties?.name === "Manggarai")
+        );
+        const joins = features.flatMap((feature) => {
+            const coords = feature.geometry.coordinates as [number, number][];
+            const offset = Number((feature.properties as { lineOffset?: number } | null)?.lineOffset ?? 0);
+            if (coords.length < 2 || !offset) return [];
+            return [true, false].flatMap((atStart) => {
+                const endpoint = atStart ? coords[0] : coords.at(-1)!;
+                const pip = pips.find((f) => {
+                    const [lon, lat] = (f.geometry as Point).coordinates;
+                    return Math.hypot((endpoint[0] - lon) * 110_700,
+                        (endpoint[1] - lat) * 110_540) < 45;
+                });
+                if (!pip) return [];
+                const before = atStart ? coords[1] : coords.at(-2)!;
+                const projectedBefore = map.project(before);
+                const projectedEnd = map.project(endpoint);
+                const shifted = airportTerminalScreenPoint(
+                    [projectedBefore.x, projectedBefore.y],
+                    [projectedEnd.x, projectedEnd.y],
+                    atStart ? -offset : offset
+                );
+                const projectedPip = map.project((pip.geometry as Point).coordinates as [number, number]);
+                const end = map.unproject(shifted);
+                const start = map.unproject([projectedPip.x, projectedPip.y]);
+                return [{
+                    type: "Feature" as const,
+                    properties: {},
+                    geometry: { type: "LineString" as const, coordinates: [
+                        [end.lng, end.lat], [start.lng, start.lat],
+                    ] },
+                }];
+            });
+        });
+        return { type: "FeatureCollection", features: joins };
+    }, [mode, mapPixels, layers, previewLayer, overview, interchangeGeo, exactZoom, hideOverview]);
 
     /**
      * The lines labels must dodge. Memoised because the axis lookup below
@@ -1110,10 +1222,18 @@ const MainMapComponent = ({
                 if (f.layer?.id === "all-stops-circle") {
                     const [lon, lat] = (f.geometry as Point).coordinates;
                     setStopFocusRequest((n) => n + 1);
+                    // The airport dot is displaced on screen only. Resolve its
+                    // real station anchor rather than searching around a pixel
+                    // offset that changes with zoom.
+                    const original = f.properties?.name === "Bandara Soekarno-Hatta"
+                        ? allStops?.features.find((feature) =>
+                            feature.properties?.name === "Bandara Soekarno-Hatta"
+                        )?.geometry as Point | undefined
+                        : undefined;
                     onStationClick?.(
                         String(f.properties?.name ?? ""),
-                        lat,
-                        lon
+                        original?.coordinates[1] ?? lat,
+                        original?.coordinates[0] ?? lon
                     );
                 }
             }}
@@ -1191,6 +1311,9 @@ const MainMapComponent = ({
                             // Colour travels in the feature, so all 700 lines
                             // stay a single draw call.
                             "line-color": ["get", "color"],
+                            // Only the airport feature carries a signed screen-space
+                            // offset. OSM coordinates and station anchors stay put.
+                            "line-offset": ["coalesce", ["get", "lineOffset"], 0],
                             // Match a selected route in KRL mode, even if an
                             // old cached overview has no opacity/width fields.
                             // Transjakarta's dense network remains faint.
@@ -1208,6 +1331,17 @@ const MainMapComponent = ({
                                           2.5,
                                       ],
                         }}
+                    />
+                </Source>
+            )}
+
+            {airportStationJoins.features.length > 0 && (
+                <Source id="airport-station-joins" type="geojson" data={airportStationJoins}>
+                    <Layer
+                        id="airport-station-join-line"
+                        type="line"
+                        layout={{ "line-cap": "round", "line-join": "round" }}
+                        paint={{ "line-color": "#2E2F70", "line-width": 3 }}
                     />
                 </Source>
             )}
@@ -1235,6 +1369,7 @@ const MainMapComponent = ({
                             paint={{
                                 "line-color": `#${l.color}`,
                                 "line-width": 3,
+                                "line-offset": ["coalesce", ["get", "lineOffset"], 0],
                                 // Slight transparency so overlapping corridors
                                 // stay legible when many routes share a street.
                                 "line-opacity": layers.length > 1 ? 0.75 : 1,
@@ -1261,6 +1396,7 @@ const MainMapComponent = ({
                         paint={{
                             "line-color": `#${previewLayer.color}`,
                             "line-width": 3,
+                            "line-offset": ["coalesce", ["get", "lineOffset"], 0],
                             "line-opacity": 1,
                         }}
                     />
@@ -1273,7 +1409,7 @@ const MainMapComponent = ({
               6,437 React components plus an O(n^2) clustering pass.
             */}
             {allStops && (
-                <Source id="all-stops" type="geojson" data={ordinaryStops}>
+                <Source id="all-stops" type="geojson" data={displayStops}>
                     {/*
                       Dot and label are one symbol here too, for the same
                       reason as the route stops: a circle layer is invisible to
@@ -1499,7 +1635,11 @@ const MainMapComponent = ({
                             Math.abs(anchor.lat - cluster.stop.stop_lat) < 1e-6 &&
                             Math.abs(anchor.lon - cluster.stop.stop_lon) < 1e-6
                         );
-                    })}
+                    }).map((cluster) =>
+                        airportTerminal && cluster.name === "Bandara Soekarno-Hatta"
+                            ? { ...cluster, lon: airportTerminal[0], lat: airportTerminal[1] }
+                            : cluster
+                    )}
                     // The card-focused stop is highlighted like a selected one,
                     // but without the popup.
                     activeName={activeStop?.name ?? focusPoint?.name ?? null}
@@ -1519,8 +1659,10 @@ const MainMapComponent = ({
             */}
             {activeStop && stopPopup && (
                 <Popup
-                    longitude={activeStop.lon}
-                    latitude={activeStop.lat}
+                    longitude={activeStop.name === "Bandara Soekarno-Hatta" && airportTerminal
+                        ? airportTerminal[0] : activeStop.lon}
+                    latitude={activeStop.name === "Bandara Soekarno-Hatta" && airportTerminal
+                        ? airportTerminal[1] : activeStop.lat}
                     offset={14}
                     padding={{ top: 12, right: 12, bottom: 12, left: 12 }}
                     closeButton={false}
