@@ -30,14 +30,42 @@ import type {
 import type { FeatureCollection } from "geojson";
 import { DualLine, SingleLine } from "@/components/route/route-line-diagram";
 import { dualDiagramFor, singleDiagramFor } from "@/utils/line-diagram";
+import { airportLineOffset } from "@/utils/krl-line-offset";
+import { airportDisplayFeatures } from "@/utils/krl-display";
 
 import { ArrowLeft, ChevronRight, MapPin, Route, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import type { TransitMode } from "@/lib/gtfs";
+
+/** What the mode picker offers. `ready: false` entries are listed but off. */
+const MODES: { value: TransitMode | "mrt"; label: string; ready: boolean }[] = [
+    { value: "gtfs", label: "Transjakarta", ready: true },
+    { value: "krl", label: "KRL Commuter Line", ready: true },
+    { value: "mrt", label: "MRT Jakarta", ready: false },
+];
+/**
+ * Baked data is served with an hour-long browser cache in production, which is
+ * correct there: it only changes at deploy. In development that backfires.
+ * After `npm run sync:krl` rewrites `data/`, the browser keeps serving the old
+ * JSON, and a hard reload does NOT clear `fetch()` responses -- only the
+ * document. The symptom was confusing: a private window showed the new
+ * geometry while the normal window kept the old one across server restarts.
+ * Bypass the HTTP cache in development only; production is untouched.
+ */
+const NO_CACHE_IN_DEV: RequestInit =
+    process.env.NODE_ENV === "production" ? {} : { cache: "no-store" };
+
+const modeLabel = (m: TransitMode) =>
+    MODES.find((x) => x.value === m)?.label ?? m;
 
 export default function Index() {
-    const [selectedMode, setSelectedMode] = useState<string>("Transjakarta");
+    // Which dataset the app is showing; also the /api/<mode>/ path segment.
+    const [mode, setMode] = useState<TransitMode>("gtfs");
+    // A request number, not a boolean: each deliberate mode switch asks the
+    // map to fit the new network exactly once, after its overview has loaded.
+    const [overviewFitRequest, setOverviewFitRequest] = useState(0);
     const [searchQuery, setSearchQuery] = useState<string>("");
 
     const [routes, setRoutes] = useState<RouteSummary[]>([]);
@@ -95,6 +123,9 @@ export default function Index() {
     const [variantTripId, setVariantTripId] = useState<string | null>(null);
 
     const [station, setStation] = useState<StationDetail | null>(null);
+    // A multi-track interchange resolves to one station, but its popup must
+    // open beside the platform the user actually clicked.
+    const [stationAnchor, setStationAnchor] = useState<{ lat: number; lon: number } | null>(null);
     const [stationLoading, setStationLoading] = useState(false);
     const [stationError, setStationError] = useState<string | null>(null);
     const [stationRoutes, setStationRoutes] = useState<RouteDetail[]>([]);
@@ -108,7 +139,7 @@ export default function Index() {
     // the route arrives in, before the card's ResizeObserver can report, so
     // the first framing must not depend on that measurement.
     const expectedCardWidth = useMemo(
-        () => (detail && !variantTripId && dualDiagramFor(detail) ? 384 : 288),
+        () => (detail && detail.route_id !== "C" && !variantTripId && dualDiagramFor(detail) ? 384 : 288),
         [detail, variantTripId]
     );
     useEffect(() => {
@@ -127,6 +158,42 @@ export default function Index() {
         return () => ro.disconnect();
     }, [cardShown]);
 
+    // Switching dataset invalidates everything tied to the old one: the
+    // selection and station, the hover preview and its cache, and the
+    // city-wide stop layer (fetched lazily per mode).
+    const switchMode = useCallback(
+        (next: TransitMode) => {
+            if (next === mode) return;
+            abortRef.current?.abort();
+            stationAbortRef.current?.abort();
+            allStopsAbortRef.current?.abort();
+            setSelectedRouteId(null);
+            setVariantTripId(null);
+            setDetail(null);
+            setDetailError(null);
+            setDetailLoading(false);
+            setHoverRouteId(null);
+            setHoverDetail(null);
+            hoverCache.current.clear();
+            setFocusStop(null);
+            setStation(null);
+            setStationAnchor(null);
+            setStationRoutes([]);
+            setStationError(null);
+            setStationLoading(false);
+            setStationExpanded(false);
+            setAllStops(null);
+            stopsRequested.current = false;
+            setOverview(null);
+            setRoutes([]);
+            setSearchQuery("");
+            setStopHits([]);
+            setOverviewFitRequest((n) => n + 1);
+            setMode(next);
+        },
+        [mode]
+    );
+
     // Load the lightweight index once (~41 KB). Geometry is fetched per route.
     useEffect(() => {
         let cancelled = false;
@@ -135,7 +202,7 @@ export default function Index() {
             setRoutesLoading(true);
             setRoutesError(null);
             try {
-                const res = await fetch("/api/gtfs/routes");
+                const res = await fetch(`/api/${mode}/routes`, NO_CACHE_IN_DEV);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data: RouteSummary[] = await res.json();
                 if (!cancelled) setRoutes(data);
@@ -154,7 +221,7 @@ export default function Index() {
         return () => {
             cancelled = true;
         };
-    }, [selectedMode]);
+    }, [mode]);
 
     // Load the overview once, after the route list -- it is context, not
     // content, so it must never delay the interactive part of the page.
@@ -163,7 +230,7 @@ export default function Index() {
 
         (async () => {
             try {
-                const res = await fetch("/api/gtfs/overview");
+                const res = await fetch(`/api/${mode}/overview`, NO_CACHE_IN_DEV);
                 if (!res.ok) return;
                 const data: ShapeCollection = await res.json();
                 if (!cancelled) setOverview(data);
@@ -175,7 +242,7 @@ export default function Index() {
         return () => {
             cancelled = true;
         };
-    }, []);
+    }, [mode]);
 
     // Fetch the hovered route's geometry. The delay keeps a quick sweep down
     // the list from firing a request per row; only a pointer that rests on a
@@ -195,8 +262,8 @@ export default function Index() {
         const timer = setTimeout(async () => {
             try {
                 const res = await fetch(
-                    `/api/gtfs/routes/${encodeURIComponent(hoverRouteId)}`,
-                    { signal: ctrl.signal }
+                    `/api/${mode}/routes/${encodeURIComponent(hoverRouteId)}`,
+                    { ...NO_CACHE_IN_DEV, signal: ctrl.signal }
                 );
                 if (!res.ok) return;
                 const data: RouteDetail = await res.json();
@@ -211,7 +278,7 @@ export default function Index() {
             clearTimeout(timer);
             ctrl.abort();
         };
-    }, [hoverRouteId]);
+    }, [hoverRouteId, mode]);
 
     // Fetch one route's geometry + stops on selection (~27 KB).
     // An AbortController keeps fast clicking from racing stale responses in.
@@ -238,8 +305,8 @@ export default function Index() {
             setDetailError(null);
             try {
                 const res = await fetch(
-                    `/api/gtfs/routes/${encodeURIComponent(selectedRouteId)}`,
-                    { signal: ctrl.signal }
+                    `/api/${mode}/routes/${encodeURIComponent(selectedRouteId)}`,
+                    { ...NO_CACHE_IN_DEV, signal: ctrl.signal }
                 );
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data: RouteDetail = await res.json();
@@ -254,6 +321,9 @@ export default function Index() {
         })();
 
         return () => ctrl.abort();
+        // `mode` is deliberately not a dependency: switching mode clears the
+        // selection first, which is what re-runs this.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedRouteId]);
 
     /**
@@ -290,7 +360,8 @@ export default function Index() {
         setStationExpanded(false);
 
         try {
-            const res = await fetch(`/api/gtfs/stops/resolve?${query}`, {
+            const res = await fetch(`/api/${mode}/stops/resolve?${query}`, {
+                ...NO_CACHE_IN_DEV,
                 signal: ctrl.signal,
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -298,6 +369,16 @@ export default function Index() {
             if (ctrl.signal.aborted) return;
 
             setStation(detail);
+            if (mode === "krl" && detail.anchors?.length) {
+                const closest = [...detail.anchors].sort(
+                    (a, b) =>
+                        Math.hypot(a.lat - stop.stop_lat, a.lon - stop.stop_lon) -
+                        Math.hypot(b.lat - stop.stop_lat, b.lon - stop.stop_lon)
+                )[0];
+                setStationAnchor({ lat: closest.lat, lon: closest.lon });
+            } else {
+                setStationAnchor(null);
+            }
         } catch (err) {
             if ((err as Error).name === "AbortError") return;
             console.error("Failed to load stop:", err);
@@ -305,7 +386,7 @@ export default function Index() {
         } finally {
             if (!ctrl.signal.aborted) setStationLoading(false);
         }
-    }, []);
+    }, [mode]);
 
     /**
      * "Tampilkan rute di peta": fetch every calling route's geometry, draw
@@ -328,8 +409,8 @@ export default function Index() {
             const results = await Promise.all(
                 station.routes.map(async (r) => {
                     const g = await fetch(
-                        `/api/gtfs/routes/${encodeURIComponent(r.route_id)}`,
-                        { signal: ctrl.signal }
+                        `/api/${mode}/routes/${encodeURIComponent(r.route_id)}`,
+                        { ...NO_CACHE_IN_DEV, signal: ctrl.signal }
                     );
                     if (!g.ok) return null;
                     return (await g.json()) as RouteDetail;
@@ -344,7 +425,7 @@ export default function Index() {
         } finally {
             if (!ctrl.signal.aborted) setStationLoading(false);
         }
-    }, [station]);
+    }, [station, mode]);
 
     const showAllStops = !selectedRouteId && !station;
 
@@ -353,22 +434,36 @@ export default function Index() {
      * The ref guards against the map firing this on every zoom change.
      */
     const stopsRequested = useRef(false);
+    const allStopsAbortRef = useRef<AbortController | null>(null);
 
     const loadAllStops = useCallback(() => {
         if (stopsRequested.current) return;
         stopsRequested.current = true;
+        const ctrl = new AbortController();
+        allStopsAbortRef.current = ctrl;
 
         (async () => {
             try {
-                const res = await fetch("/api/gtfs/stops/geo");
-                if (!res.ok) return;
-                setAllStops((await res.json()) as FeatureCollection);
+                const res = await fetch(`/api/${mode}/stops/geo`, {
+                    ...NO_CACHE_IN_DEV,
+                    signal: ctrl.signal,
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = (await res.json()) as FeatureCollection;
+                if (!ctrl.signal.aborted) setAllStops(data);
             } catch {
                 // Non-fatal: zooming in simply shows no extra pins.
-                stopsRequested.current = false;
+                if (!ctrl.signal.aborted) stopsRequested.current = false;
             }
         })();
-    }, []);
+    }, [mode]);
+
+    // KRL has only a few dozen stations. Fetch its small station layer
+    // immediately so interchanges are available at the default map zoom.
+    // Leave Transjakarta's 6,437-stop layer lazy.
+    useEffect(() => {
+        if (mode === "krl") loadAllStops();
+    }, [mode, loadAllStops]);
 
     /**
      * Resolve a station clicked on the GPU stop layer. Same path as a marker
@@ -384,14 +479,13 @@ export default function Index() {
                 sequence: 0,
             });
         },
-        // handleStopClick is stable (useCallback with [] deps).
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        []
+        [handleStopClick]
     );
 
     const clearStation = useCallback(() => {
         stationAbortRef.current?.abort();
         setStation(null);
+        setStationAnchor(null);
         setStationRoutes([]);
         setStationError(null);
         setStationLoading(false);
@@ -414,6 +508,31 @@ export default function Index() {
         setDetailLoading(false);
     }, [clearStation]);
 
+    // Split the airport hairpin at Duri for display only: both sides terminate
+    // on the same passenger pip. Keep baked geometry and timetable unchanged.
+    const airportDisplay = useCallback((routeId: string, geometry: DrawnLayer["geometry"]) => {
+        if (mode !== "krl" || routeId !== "A") return geometry;
+        const airport = stationRoutes.find((r) => r.route_id === "A") ??
+            (detail?.route_id === "A" ? detail : null) ??
+            (hoverDetail?.route_id === "A" ? hoverDetail : null);
+        const duriStop = airport?.stops.find((stop) => stop.stop_name === "Duri");
+        const manggarai = allStops?.features.find((feature) => feature.properties?.name === "Manggarai");
+        const anchors = (manggarai?.properties?.anchors ?? []) as { routeId: string; lat: number; lon: number }[];
+        const bogor = anchors.find((a) => a.routeId === "B");
+        const cikarang = anchors.find((a) => a.routeId === "C");
+        const manggaraiStop = airport?.stops.find((stop) => stop.stop_name === "Manggarai");
+        const start: [number, number] | null = bogor && cikarang
+            ? [(bogor.lon + cikarang.lon) / 2, (bogor.lat + cikarang.lat) / 2]
+            : manggaraiStop ? [manggaraiStop.stop_lon, manggaraiStop.stop_lat] : null;
+        if (!duriStop || !start) return geometry;
+        return airportDisplayFeatures(
+            geometry,
+            [duriStop.stop_lon, duriStop.stop_lat],
+            start,
+            () => true
+        );
+    }, [mode, allStops, stationRoutes, detail, hoverDetail]);
+
     // What the map draws: the station's routes when a stop is open, otherwise
     // the selected route -- either its trunk patterns or one chosen variant.
     const layers: DrawnLayer[] = useMemo(() => {
@@ -423,7 +542,8 @@ export default function Index() {
             // the non-overlapping option saved in commit 46a9647.
             return stationRoutes.map((r) => {
                 const trunks = (r.variants ?? [])
-                    .filter((v) => v.kind === "utama")
+                    .filter((v) => v.kind === "utama" ||
+                        (r.route_id === "B" && v.kind === "alihan"))
                     .map((v) => r.geometryByShape?.[v.shape_id])
                     .filter((c): c is [number, number][] => Boolean(c?.length));
                 const use: [number, number][][] = trunks.length
@@ -435,18 +555,21 @@ export default function Index() {
                 return {
                     id: r.route_id,
                     color: r.route_color,
-                    geometry: {
+                    geometry: airportDisplay(r.route_id, {
                         type: "FeatureCollection" as const,
                         features: use
                             .map((coordinates) => ({
                                 type: "Feature" as const,
-                                properties: { shape_id: "" },
+                                properties: {
+                                    shape_id: "",
+                                    lineOffset: mode === "krl" ? airportLineOffset(r.route_id, coordinates) : 0,
+                                },
                                 geometry: {
                                     type: "LineString" as const,
                                     coordinates,
                                 },
                             })),
-                    },
+                    }),
                 };
             });
         }
@@ -460,7 +583,10 @@ export default function Index() {
         // shared stretches, is saved in commit 46a9647 for easy restoration.
         const lines: [number, number][][] = detail.variants
             .filter((v) =>
-                variantTripId ? v.trip_id === variantTripId : v.kind === "utama"
+                variantTripId
+                    ? v.trip_id === variantTripId
+                    : v.kind === "utama" ||
+                      (detail.route_id === "B" && v.kind === "alihan")
             )
             .map((v) => lineFor(v.shape_id))
             .filter((c): c is [number, number][] => Boolean(c?.length));
@@ -468,7 +594,10 @@ export default function Index() {
         const features = lines
             .map((coordinates) => ({
                 type: "Feature" as const,
-                properties: { shape_id: "" },
+                properties: {
+                    shape_id: "",
+                    lineOffset: mode === "krl" ? airportLineOffset(detail.route_id, coordinates) : 0,
+                },
                 geometry: { type: "LineString" as const, coordinates },
             }));
 
@@ -479,7 +608,10 @@ export default function Index() {
                 .filter((c) => c?.length)
                 .map((coordinates) => ({
                     type: "Feature" as const,
-                    properties: { shape_id: "" },
+                    properties: {
+                        shape_id: "",
+                        lineOffset: mode === "krl" ? airportLineOffset(detail.route_id, coordinates) : 0,
+                    },
                     geometry: { type: "LineString" as const, coordinates },
                 }));
             if (!all.length) return [];
@@ -487,7 +619,7 @@ export default function Index() {
                 {
                     id: detail.route_id,
                     color: detail.route_color,
-                    geometry: { type: "FeatureCollection", features: all },
+                    geometry: airportDisplay(detail.route_id, { type: "FeatureCollection", features: all }),
                 },
             ];
         }
@@ -496,10 +628,10 @@ export default function Index() {
             {
                 id: `${detail.route_id}:${variantTripId ?? "utama"}`,
                 color: detail.route_color,
-                geometry: { type: "FeatureCollection", features },
+                geometry: airportDisplay(detail.route_id, { type: "FeatureCollection", features }),
             },
         ];
-    }, [stationExpanded, stationRoutes, detail, variantTripId]);
+    }, [stationExpanded, stationRoutes, detail, variantTripId, mode, airportDisplay]);
 
     // The hovered route's trunk line. Line only (no pins), and deliberately
     // separate from `layers`: the map frames `layers` and nothing else, so a
@@ -512,7 +644,8 @@ export default function Index() {
 
         // Match the selected-route map: preview every complete trunk shape.
         const trunks = (hoverDetail.variants ?? [])
-            .filter((v) => v.kind === "utama")
+            .filter((v) => v.kind === "utama" ||
+                (hoverDetail.route_id === "B" && v.kind === "alihan"))
             .map((v) => hoverDetail.geometryByShape?.[v.shape_id])
             .filter((c): c is [number, number][] => Boolean(c?.length));
         const lines: [number, number][][] = trunks.length
@@ -524,7 +657,10 @@ export default function Index() {
         const features = lines
             .map((coordinates) => ({
                 type: "Feature" as const,
-                properties: { shape_id: "" },
+                properties: {
+                    shape_id: "",
+                    lineOffset: mode === "krl" ? airportLineOffset(hoverDetail.route_id, coordinates) : 0,
+                },
                 geometry: { type: "LineString" as const, coordinates },
             }));
         if (!features.length) return null;
@@ -532,9 +668,9 @@ export default function Index() {
         return {
             id: hoverDetail.route_id,
             color: hoverDetail.route_color,
-            geometry: { type: "FeatureCollection", features },
+            geometry: airportDisplay(hoverDetail.route_id, { type: "FeatureCollection", features }),
         };
-    }, [stationExpanded, hoverDetail, hoverRouteId, detail]);
+    }, [stationExpanded, hoverDetail, hoverRouteId, detail, mode, airportDisplay]);
 
     // Stops shown as pins.
     const visibleStops: RouteStop[] = useMemo(() => {
@@ -562,7 +698,8 @@ export default function Index() {
             const out: RouteStop[] = [selected];
             for (const r of stationRoutes) {
                 const trunk = (r.variants ?? []).filter(
-                    (v) => v.kind === "utama"
+                    (v) => v.kind === "utama" ||
+                        (r.route_id === "B" && v.kind === "alihan")
                 );
                 const allow = trunk.length
                     ? new Set(trunk.flatMap((v) => v.stopIds))
@@ -646,8 +783,8 @@ export default function Index() {
         const timer = setTimeout(async () => {
             try {
                 const res = await fetch(
-                    `/api/gtfs/search?q=${encodeURIComponent(q)}`,
-                    { signal: ctrl.signal }
+                    `/api/${mode}/search?q=${encodeURIComponent(q)}`,
+                    { ...NO_CACHE_IN_DEV, signal: ctrl.signal }
                 );
                 if (!res.ok) return;
                 setStopHits((await res.json()) as StationSearchHit[]);
@@ -660,7 +797,7 @@ export default function Index() {
             clearTimeout(timer);
             ctrl.abort();
         };
-    }, [searchQuery]);
+    }, [searchQuery, mode]);
 
     // Derived state belongs in useMemo, not in a useEffect + setState pair.
     const filteredRoutes = useMemo(() => {
@@ -704,14 +841,15 @@ export default function Index() {
                 </button>
 
                 <div className="hidden items-center p-4 text-xl font-bold font-pt-sans md:flex">
-                    <Link href={"/"}>Transum App - {selectedMode}</Link>
+                    <Link href={"/"}>Transum App - {modeLabel(mode)}</Link>
                 </div>
                 <Separator className="hidden md:block" />
-                <div className="hidden w-full flex-col p-4 md:flex">
+                <div className="flex w-full flex-col px-4 pb-3 pt-1 md:p-4">
                     <Select
-                        onValueChange={(val) => setSelectedMode(val)}
-                        defaultValue="Transjakarta"
-                        disabled
+                        value={mode}
+                        onValueChange={(val) => {
+                            if (val === "gtfs" || val === "krl") switchMode(val);
+                        }}
                     >
                         <SelectTrigger className="w-full border-white/20 bg-white/10 text-white [&>svg]:opacity-70">
                             <SelectValue placeholder="Pilih moda" />
@@ -721,13 +859,16 @@ export default function Index() {
                                 <SelectLabel className="pl-4">
                                     Jakarta
                                 </SelectLabel>
-                                <SelectItem value="Transjakarta">
-                                    Transjakarta
-                                </SelectItem>
-                                <SelectItem value="MRT Jakarta">
-                                    MRT Jakarta
-                                </SelectItem>
-                                <SelectItem value="KCI">KCI</SelectItem>
+                                {MODES.map((m) => (
+                                    <SelectItem
+                                        key={m.value}
+                                        value={m.value}
+                                        disabled={!m.ready}
+                                    >
+                                        {m.label}
+                                        {!m.ready && " (segera)"}
+                                    </SelectItem>
+                                ))}
                             </SelectGroup>
                         </SelectContent>
                     </Select>
@@ -980,9 +1121,11 @@ export default function Index() {
                     // the route takes a moment to arrive and the network
                     // must already be gone, or it flashes back in between.
                     hideOverview={!!hoverRouteId && !stationExpanded}
+                    mode={mode}
                     forcePins={previewEnds.length > 0}
                     routeStops={pinStops}
                     overview={overview}
+                    overviewFitRequest={overviewFitRequest}
                     allStops={allStops}
                     showAllStops={showAllStops}
                     onStationClick={handleStationClick}
@@ -1002,8 +1145,8 @@ export default function Index() {
                     activeStop={
                         station
                             ? {
-                                  lat: station.lat,
-                                  lon: station.lon,
+                                  lat: stationAnchor?.lat ?? station.lat,
+                                  lon: stationAnchor?.lon ?? station.lon,
                                   name: station.name,
                               }
                             : null
@@ -1061,6 +1204,16 @@ function VariantPanel({
 
     const variants = detail.variants ?? [];
     const trunks = variants.filter((v) => v.kind === "utama");
+    // Cikarang's two main rackets each visit Cikarang twice, with a city loop
+    // between. They are not an outward/return pair: aligning them on two rails
+    // would duplicate Jatinegara and imply stops in the wrong direction.
+    const circuit =
+        detail.route_id === "C" &&
+        trunks.some(
+            (v) =>
+                v.stopIds.length > 2 &&
+                v.stopIds[0] === v.stopIds[v.stopIds.length - 1]
+        );
     const trunkIdx =
         trunkSel.rid === detail.route_id
             ? Math.min(trunkSel.i, Math.max(trunks.length - 1, 0))
@@ -1071,12 +1224,12 @@ function VariantPanel({
         trunks[trunkIdx] ||
         variants[0];
 
-    // Both directions side by side when they mirror each other (most BRT
-    // trunks); otherwise the shown pattern as a single line. A picked
-    // diversion is always single -- it is one direction by definition.
+    // Both directions side by side when they mirror each other. Each
+    // Cikarang racket is itself a complete loop and must remain an ordered
+    // single line. Selecting either main pattern also shows just that line.
     const dual = useMemo(
-        () => (selected ? null : dualDiagramFor(detail)),
-        [detail, selected]
+        () => (selected || circuit ? null : dualDiagramFor(detail)),
+        [detail, selected, circuit]
     );
     const lineStops = useMemo(
         () => (shown ? singleDiagramFor(detail, shown).stops : []),
@@ -1140,7 +1293,9 @@ function VariantPanel({
               const v = variants.find((x) => x.trip_id === selected);
               return v ? (v.via ? `via ${v.via}` : v.headsign) : "Utama";
           })()
-        : "Utama";
+        : circuit
+          ? "Kedua arah putaran"
+          : "Utama";
 
     return (
         <div
@@ -1223,20 +1378,34 @@ function VariantPanel({
             {!collapsed && (
                 <div className="pb-1">
 
+            {circuit && (
+                <Row
+                    id="C-all"
+                    active={selected === null}
+                    title="Kedua arah putaran"
+                    sub="Tampilkan kedua jalur di peta"
+                    onClick={() => onSelect(null)}
+                />
+            )}
+
             {variants
                 .filter((v) => v.kind === "utama")
                 .map((v) => (
                     <Row
                         key={v.trip_id}
                         id={v.trip_id}
-                        active={selected === null}
-                        title={`Utama ${dirLabel(v.direction_id)} ${v.headsign}`}
-                        sub={`${v.stopCount} halte${
+                        active={circuit ? selected === v.trip_id : selected === null}
+                        title={
+                            circuit
+                                ? `Putaran via ${v.via ?? v.headsign}`
+                                : `Utama ${dirLabel(v.direction_id)} ${v.headsign}`
+                        }
+                        sub={`${v.stopCount} ${detail.route_id === "C" ? "pemberhentian" : "halte"}${
                             v.headwaySecs
                                 ? ` \u00b7 tiap ${Math.round(v.headwaySecs / 60)} mnt`
                                 : ""
                         }`}
-                        onClick={() => onSelect(null)}
+                        onClick={() => onSelect(circuit ? v.trip_id : null)}
                     />
                 ))}
 
@@ -1305,8 +1474,9 @@ function VariantPanel({
 
             {!collapsed && (
                 <p className="px-3 pt-1 pb-2.5 text-[10px] leading-snug text-white/35">
-                    Hanya tampil bila dipilih. GTFS tidak mencatat pengalihan
-                    yang sedang berlaku.
+                    {detail.route_id === "C"
+                        ? "Pola dari OpenStreetMap; tidak ada jadwal kereta dalam data ini."
+                        : "Hanya tampil bila dipilih. GTFS tidak mencatat pengalihan yang sedang berlaku."}
                 </p>
             )}
 
@@ -1320,7 +1490,8 @@ function VariantPanel({
             >
                 <MapPin size={13} className="shrink-0 opacity-60" />
                 <span className="min-w-0 flex-1 text-[10px] font-bold tracking-wide text-white/40 uppercase">
-                    Halte{stopCount > 0 ? " \u00b7 " + stopCount : ""}
+                    {detail.route_id === "C" ? "Pemberhentian" : "Halte"}
+                    {stopCount > 0 ? " \u00b7 " + stopCount : ""}
                 </span>
                 <ChevronRight
                     size={14}
@@ -1355,14 +1526,16 @@ function VariantPanel({
                                             : "text-white/50 hover:bg-white/10"
                                     }`}
                                 >
-                                    {dirLabel(v.direction_id)} {v.headsign}
+                                    {circuit
+                                        ? `via ${v.via ?? v.headsign}`
+                                        : `${dirLabel(v.direction_id)} ${v.headsign}`}
                                 </button>
                             ))}
                         </div>
                     )}
-                    {selected && shown && (
+                    {(selected || circuit) && shown && (
                         <div className="truncate px-3 pb-2 text-[11px] text-white/50">
-                            {dirLabel(shown.direction_id)}{" "}
+                            {circuit ? "Pola: " : dirLabel(shown.direction_id) + " "}
                             {shown.via ? "via " + shown.via : shown.headsign}
                         </div>
                     )}

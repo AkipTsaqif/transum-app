@@ -111,6 +111,17 @@ export interface StationIndexEntry {
     routes: string[];
     /** route_id -> [position along that route, total stops on it]. */
     positions: Record<string, [number, number]>;
+    /** Distinct track-side locations for a multi-line rail interchange. */
+    anchors?: StationAnchor[];
+}
+
+export interface StationAnchor {
+    routeId: string;
+    stopId: string;
+    lat: number;
+    lon: number;
+    /** CSS colour for the line calling at this physical platform. */
+    color: string;
 }
 
 /** A route calling at a station, with where along it the station sits. */
@@ -127,6 +138,8 @@ export interface StationDetail {
     lon: number;
     platforms: number;
     routes: StationRoute[];
+    /** Track-side locations, present for multi-line KRL interchanges. */
+    anchors?: StationAnchor[];
 }
 
 /** One result from `/api/gtfs/search`. */

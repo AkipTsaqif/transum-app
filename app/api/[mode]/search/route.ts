@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { searchStations } from "@/lib/gtfs";
+import { parseMode, searchStations } from "@/lib/gtfs";
 
 /**
  * GET /api/gtfs/search?q=
@@ -10,14 +10,18 @@ import { searchStations } from "@/lib/gtfs";
  *
  * Dynamic by necessity: the response depends on the query string.
  */
-export async function GET(request: Request) {
+export async function GET(
+    request: Request,
+    { params }: { params: Promise<{ mode: string }> }
+) {
+    const mode = parseMode((await params).mode);
     const q = new URL(request.url).searchParams.get("q")?.trim() ?? "";
 
     // Two characters is the point where results stop being the whole dataset.
     if (q.length < 2) return NextResponse.json([]);
 
     try {
-        const results = await searchStations(q, 20);
+        const results = await searchStations(q, 20, mode);
         return NextResponse.json(results, {
             headers: { "Cache-Control": "public, max-age=300" },
         });

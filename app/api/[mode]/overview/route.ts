@@ -1,5 +1,17 @@
 import { NextResponse } from "next/server";
-import { getOverview } from "@/lib/gtfs";
+import { getOverview, parseMode } from "@/lib/gtfs";
+import { TRANSIT_MODES } from "@/lib/gtfs";
+
+/**
+ * The mode is a path segment (`/api/gtfs/...`, `/api/krl/...`), not a query
+ * parameter: reading `request.url` would turn this route dynamic and drop its
+ * build-time prerender, whereas a path segment with `generateStaticParams`
+ * keeps both modes static. `dynamicParams = false` makes any other mode a 404.
+ */
+export const dynamicParams = false;
+export const generateStaticParams = () =>
+    TRANSIT_MODES.map((mode) => ({ mode }));
+
 
 /**
  * GET /api/gtfs/overview
@@ -18,9 +30,14 @@ import { getOverview } from "@/lib/gtfs";
  */
 export const revalidate = 86400;
 
-export async function GET() {
+export async function GET(
+    _request: Request,
+    { params }: { params: Promise<{ mode: string }> }
+) {
+    const mode = parseMode((await params).mode);
+
     try {
-        const overview = await getOverview();
+        const overview = await getOverview(mode);
 
         return NextResponse.json(overview, {
             headers: {

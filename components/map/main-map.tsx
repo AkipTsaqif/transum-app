@@ -1,6 +1,7 @@
 "use client";
 
 import MapGL, {
+    AttributionControl,
     Layer,
     NavigationControl,
     Popup,
@@ -19,6 +20,18 @@ import type { FeatureCollection, Point } from "geojson";
 import { useTheme } from "next-themes";
 import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
 import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
+import {
+    interchangeFeatures,
+    interchangeSeparationPx,
+    interchangesFromStops,
+    projectedInterchangeEndpoints,
+} from "@/utils/interchange";
+import { AIRPORT_LINE_OFFSET_PX } from "@/utils/krl-line-offset";
+import {
+    airportManggaraiDisplayPoint,
+    airportTerminalScreenPoint,
+    manggaraiDisplayPlatforms,
+} from "@/utils/krl-display";
 
 /**
  * MapLibre v6 loads its tile-processing worker from a URL it derives from its
@@ -76,25 +89,27 @@ const LABEL_FONT = ["PT Sans Narrow Bold"];
 
 /**
  * Credit for the transit data, shown alongside the basemap's own credits in
- * MapLibre's attribution control.
+ * MapLibre's attribution control. Which one depends on the dataset.
  *
- * Every route, stop and timetable comes from Transjakarta's official GTFS
- * Static feed, which PT Transportasi Jakarta publishes under CC BY 4.0 (see
- * https://ppid.transjakarta.co.id/informasi/berkala). The licence requires
- * credit, a link to the licence, and an indication of changes -- hence
- * "diolah": stops are merged into stations and trips are classified into
- * patterns here, neither of which is in the original feed.
+ * gtfs: every route, stop and timetable comes from Transjakarta's official
+ * GTFS Static feed, which PT Transportasi Jakarta publishes under CC BY 4.0
+ * (see https://ppid.transjakarta.co.id/informasi/berkala). The licence
+ * requires credit, a link to the licence, and an indication of changes --
+ * hence "diolah": stops are merged into stations and trips are classified
+ * into patterns here, neither of which is in the original feed.
  *
- * The basemap credits (OpenFreeMap, OpenMapTiles, OpenStreetMap) are added
- * automatically from the tile source, so they are not repeated here.
+ * krl: line geometry and stations come from OpenStreetMap contributors
+ * (ODbL), also processed here.
  *
- * Module-level on purpose: react-map-gl only reads `attributionControl` when
- * the map is constructed, so the value must be stable.
+ * The basemap's own credits (OpenFreeMap, OpenMapTiles, OpenStreetMap) are
+ * added automatically from the tile source, so they are not repeated here.
  */
-const ATTRIBUTION_CONTROL = {
-    customAttribution:
+const ATTRIBUTION: Record<"gtfs" | "krl", string> = {
+    gtfs:
         'Data rute \u00a9 <a href="https://ppid.transjakarta.co.id/informasi/berkala" target="_blank" rel="noopener noreferrer">PT Transportasi Jakarta</a>, ' +
         '<a href="https://creativecommons.org/licenses/by/4.0/deed.id" target="_blank" rel="noopener noreferrer">CC BY 4.0</a> \u00b7 diolah',
+    krl:
+        'Data rute KRL \u00a9 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">kontributor OpenStreetMap</a> \u00b7 diolah',
 };
 
 /**
@@ -139,20 +154,80 @@ interface DotSpec {
 }
 
 /**
+ * The stop symbol palette, shared so every marker on the map reads as the
+ * same family: navy body with a white ring.
+ *
+ * These are literals because a MapLibre paint property cannot read a CSS
+ * variable; each mirrors a theme variable exactly.
+ *
+ *   STOP_INK     --jakarta            hsl(210 55.56% 10.59%)  #0C1B2A
+ *   STOP_RING    white
+ *
+ * `--jakarta-selected` (#00629F) is deliberately NOT used here: that is the
+ * sidebar's selected-row blue, not the app's base accent.
+ */
+const STOP_INK = "#0C1B2A";
+const STOP_RING = "#FFFFFF";
+
+/**
+ * On-screen diameter of an ordinary station dot, by zoom.
+ *
+ * `all-stop-dot` is drawn at r5 with a 2px stroke, so the visible circle is
+ * 12px across with a 2px ring; scaled by `icon-size` (0.62 at z12, 1.25 at
+ * z17) that is 7.44px and 15px. The interchange connector reuses this ramp so
+ * a station looks the same size whether or not it is an interchange.
+ *
+ * A zoom expression may only appear at the top level of a property, so each
+ * derived size below is written out as its own interpolate rather than by
+ * wrapping this one in arithmetic.
+ */
+const stationDotSize = (offset = 0, scale = 1): ExpressionSpecification => [
+    "interpolate",
+    ["linear"],
+    ["zoom"],
+    12,
+    (7.44 + offset) * scale,
+    17,
+    (15 + offset) * scale,
+];
+
+/**
+ * One size ramp for every station glyph on the map.
+ *
+ * `all-stop-dot` and the route pins are drawn from the same 14px image, so
+ * giving both this `icon-size` makes a stop the same size whether it is the
+ * faint city dot or the selected route pin. Before this the pins were a fixed
+ * 14px while the dots shrank to ~8.7px at z10-12, so entering station mode
+ * looked like every marker had grown.
+ */
+const STATION_ICON_SIZE: ExpressionSpecification = [
+    "interpolate",
+    ["linear"],
+    ["zoom"],
+    12,
+    0.62,
+    17,
+    1.25,
+];
+
+/**
  * Every pin image the map registers, keyed by the id the layers refer to.
  *
  * `all-stop-dot` is drawn small and scaled up by `icon-size`; a single image
  * reused across the zoom range beats registering one per zoom step.
  */
 const PIN_IMAGES: Record<string, DotSpec> = {
-    "stop-pin": { r: 5, stroke: 2, fill: "#0C1B2A", ring: "#FFFFFF" },
-    "stop-pin-active": { r: 7, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
+    "stop-pin": { r: 5, stroke: 2, fill: STOP_INK, ring: STOP_RING },
+    // Same geometry as `stop-pin`: the inverted fill already marks the
+    // selection, and a larger circle made the selected stop jump in size.
+    "stop-pin-active": { r: 5, stroke: 2, fill: STOP_RING, ring: STOP_INK },
     // Drawn at the size it has when `icon-size` is 1, then scaled per zoom.
-    "all-stop-dot": { r: 5, stroke: 2, fill: "#0C1B2A", ring: "#FFFFFF" },
+    "all-stop-dot": { r: 5, stroke: 2, fill: STOP_INK, ring: STOP_RING },
     // Hover: same geometry, inverted like the active route pin so the cursor
-    // target is unmistakable.
-    "all-stop-dot-hover": { r: 6, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
-    "stop-pin-hover": { r: 6, stroke: 2, fill: "#FFFFFF", ring: "#0C1B2A" },
+    // target is unmistakable. Same radius as the resting pin -- a bigger disc
+    // read as "the stop grew", which is not the cue we want.
+    "all-stop-dot-hover": { r: 5, stroke: 2, fill: STOP_RING, ring: STOP_INK },
+    "stop-pin-hover": { r: 5, stroke: 2, fill: STOP_RING, ring: STOP_INK },
 };
 
 export interface DrawnLayer {
@@ -175,6 +250,8 @@ interface MainMapComponentProps {
      * the instant the hover starts.
      */
     hideOverview?: boolean;
+    /** Which dataset is shown; selects the data credit. */
+    mode?: "gtfs" | "krl";
     /**
      * Pixels of map hidden under an overlay on the left (the floating route
      * card on wide screens). Added to fitBounds' left padding so a framed
@@ -195,6 +272,8 @@ interface MainMapComponentProps {
     routeStops: RouteStop[];
     /** Every route, faint, shown only when nothing is selected. */
     overview?: ShapeCollection | null;
+    /** Incremented only when the user switches transit modes. */
+    overviewFitRequest?: number;
     /** Every station as points; GPU-rendered above `allStopsZoom`. */
     allStops?: FeatureCollection | null;
     /**
@@ -505,6 +584,8 @@ const StopMarkers = React.memo(function StopMarkers({
                     ],
                     "icon-allow-overlap": true,
                     "icon-ignore-placement": false,
+                    // Same on-screen size as the city-wide dot at every zoom.
+                    "icon-size": STATION_ICON_SIZE,
                     ...(showLabels
                         ? {
                               "text-field": ["get", "name"],
@@ -517,15 +598,11 @@ const StopMarkers = React.memo(function StopMarkers({
                               // Anchors ordered per stop so the sides clear of
                               // the route line are tried first. Supersedes
                               // text-variable-anchor + text-radial-offset,
-                              // which cannot vary per feature. The active pin
-                              // is drawn larger (r7+2 vs r5+2), so it gets the
-                              // bigger radius to clear its own icon.
-                              "text-variable-anchor-offset": [
-                                  "case",
-                                  ["==", ["get", "active"], 1],
-                                  anchorOffsetExpression(1.1),
+                              // which cannot vary per feature. Every pin image
+                              // is the same size now, so one radius covers the
+                              // active one too.
+                              "text-variable-anchor-offset":
                                   anchorOffsetExpression(0.9),
-                              ],
                               "text-justify": "auto",
                               "text-allow-overlap": false,
                               "text-ignore-placement": false,
@@ -561,11 +638,13 @@ const MainMapComponent = ({
     layers,
     previewLayer = null,
     hideOverview = false,
+    mode = "gtfs",
     leftInset = 0,
     focusPoint = null,
     forcePins = false,
     routeStops,
     overview,
+    overviewFitRequest = 0,
     allStops,
     showAllStops = true,
     activeStop,
@@ -579,15 +658,31 @@ const MainMapComponent = ({
     // marker gate hid every stop the moment fitBounds finished. Pins are cheap
     // (tens per route, clustered) -- show them as soon as a route is framed,
     // and keep labels for when the user is actually zoomed in.
-    const zoomThreshold = 10;
+    // Fitting the whole KRL network (including Bogor) can settle around z9.
+    // Keep Transjakarta's existing z10 route-pin gate unchanged.
+    const zoomThreshold = mode === "krl" ? 9 : 10;
     // Auto-fit frames a trunk anywhere from z11.9 to z15.8 depending on how
     // long it is, so a high fixed gate hid labels on most routes right after
     // the camera settled. Collision placement already drops labels that will
     // not fit, so the gate only needs to stop the far-out view being noisy.
-    const labelThreshold = 11;
+    // KRL has ~80 stations, so its names can be read at the city-wide zoom a
+    // route fit settles on (z9.x with Bogor). Transjakarta's 6,437 names stay
+    // gated: at this zoom they are an unreadable, expensive smear.
+    const labelThreshold = mode === "krl" ? 9 : 11;
     const nearbyThreshold = 55;
-    /** Below this, 6,437 pins would be an unreadable smear. */
-    const allStopsZoom = 12;
+    /**
+     * Where the city-wide station dots begin. Transjakarta has 6,437 stops,
+     * which below z12 are an unreadable smear. The KRL network is ~80
+     * stations and always spans the whole region, so its stations show from
+     * the full-network fit (z9) -- the same floor as the route pins. GTFS
+     * keeps its separate z12 gate.
+     */
+    const allStopsZoom = mode === "krl" ? zoomThreshold : 12;
+    /**
+     * Names for the city-wide dots. KRL shows them as soon as the dots appear
+     * at z9; Transjakarta keeps the higher gate.
+     */
+    const allStopsLabelZoom = mode === "krl" ? zoomThreshold : 14;
 
     const mapRef = useRef<MapRef | null>(null);
 
@@ -611,8 +706,35 @@ const MainMapComponent = ({
     // fitBounds can animate freely. A controlled viewState would be re-applied
     // by React on every frame and fight the easing.
     const [zoomLevel, setZoomLevel] = useState(10);
+    // Map pixels. Update together with zoom because the fallback interchange
+    // endpoints are deliberately spaced in screen coordinates.
+    const [mapPixels, setMapPixels] = useState<
+        { width: number; height: number } | null
+    >(null);
+    /**
+     * Un-quantised zoom, for the interchange only.
+     *
+     * `zoomLevel` below is floored to whole steps so that most of the map
+     * re-renders about once per level instead of once per frame. The
+     * interchange cannot use it: its endpoint spacing is a continuous function
+     * of zoom, so a floored value left the connector at the previous level's
+     * size until the camera crossed an integer boundary -- visible as the
+     * marker lagging behind and drifting off its line while zooming in.
+     *
+     * Only the interchange reads this, so the per-frame update costs one
+     * comparison and nothing else re-renders.
+     */
+    const [exactZoom, setExactZoom] = useState(10);
 
     const handleMove = useCallback((e: { viewState: { zoom: number } }) => {
+        setMapPixels(
+            () => {
+                const map = mapRef.current?.getMap?.();
+                return map ? { width: map.getCanvas().width, height: map.getCanvas().height } : null;
+            }
+        );
+        // Continuous, for the interchange's screen-space spacing.
+        setExactZoom(e.viewState.zoom);
         // Quantise: markers only care about whole zoom steps, so this re-renders
         // ~once per zoom level instead of once per animation frame.
         setZoomLevel((prev) => {
@@ -651,7 +773,9 @@ const MainMapComponent = ({
         const desired = [
             ...order.filter((id) => id === "overview-line"),
             ...order.filter((id) => id.startsWith("shape-line")),
+            ...order.filter((id) => id === "airport-station-join-line"),
             ...order.filter((id) => id.startsWith("all-stops-")),
+            ...order.filter((id) => id.startsWith("interchange-")),
             ...order.filter((id) => id === "route-stop-pin"),
         ];
         if (desired.length < 2) return;
@@ -698,6 +822,193 @@ const MainMapComponent = ({
         () => clusterStops(routeStops, nearbyThreshold),
         [routeStops, nearbyThreshold]
     );
+    // Physical platforms are separate anchors; only their label and the
+    // station detail are shared. Derive this from baked station metadata, not
+    // by guessing that any nearby pair of stops must be an interchange.
+    const interchangeGroups = useMemo(
+        () => mode === "krl" ? interchangesFromStops(allStops) : [],
+        [mode, allStops]
+    );
+    const activeInterchanges = useMemo(() => {
+        if (showAllStops) return interchangeGroups;
+        const names = new Set(routeStops.map((stop) => removeOppStopPrefix(stop.stop_name)));
+        return interchangeGroups.filter((group) => names.has(group.name));
+    }, [showAllStops, interchangeGroups, routeStops]);
+    const interchangeGeo = useMemo(
+        () => interchangeFeatures(activeInterchanges, (group, points) => {
+            if (!mapPixels) return points;
+            const map = mapRef.current?.getMap?.();
+            if (!map) return points;
+            const airportIndex = group.anchors.findIndex((a) => a.routeId === "A");
+            const manggarai = group.name === "Manggarai"
+                ? airportManggaraiDisplayPoint(group.anchors)
+                : null;
+            const schematic = points.map((point, index) =>
+                index === airportIndex && manggarai ? manggarai : point
+            );
+            // Only the DISPLAY of two platforms is separated at far-out zooms.
+            // Data stays geographic; this converges to the exact anchors as
+            // their real screen distance grows.
+            const projected = schematic.map(([lon, lat]) => {
+                const point = map.project([lon, lat]);
+                return [point.x, point.y] as [number, number];
+            });
+            // Scale the gap with the continuous zoom, not the floored one:
+            // a floored value keeps the previous level's spacing until the
+            // camera crosses an integer, which made the marker lag and drift
+            // off its line while zooming in.
+            const gap = interchangeSeparationPx(exactZoom);
+            const visible = manggarai
+                ? manggaraiDisplayPlatforms(projected, group.anchors.map((a) => a.routeId), gap / 2)
+                : projectedInterchangeEndpoints(projected, gap);
+            return visible.map((point) => {
+                const lngLat = map.unproject(point);
+                return [lngLat.lng, lngLat.lat];
+            });
+        }),
+        [activeInterchanges, mapPixels, exactZoom]
+    );
+    /**
+     * Hover state as a feature property rather than feature-state: `["zoom"]`
+     * may only sit at the top level of a paint expression, so a hover variant
+     * cannot be a `case` around the zoom-driven size. A filtered extra layer
+     * keeps the zoom ramps intact and costs nothing when nothing is hovered.
+     */
+    const interchangeHoverGeo = useMemo(() => {
+        const mark = (collection: FeatureCollection) => ({
+            ...collection,
+            features: collection.features.map((feature) => ({
+                ...feature,
+                properties: {
+                    ...feature.properties,
+                    hovered:
+                        hoveredStop &&
+                        hoveredStop === String(feature.properties?.name ?? "")
+                            ? 1
+                            : 0,
+                },
+            })),
+        });
+        return {
+            pills: mark(interchangeGeo.pills),
+            labels: mark(interchangeGeo.labels),
+            endpoints: mark(interchangeGeo.endpoints),
+        };
+    }, [interchangeGeo, hoveredStop]);
+    const visibleInterchanges =
+        mode === "krl" && activeInterchanges.length > 0;
+    const interchangeNames = useMemo(
+        () => new Set(interchangeGroups.map((g) => g.name)),
+        [interchangeGroups]
+    );
+    const ordinaryStops = useMemo<FeatureCollection>(
+        () => ({
+            type: "FeatureCollection",
+            features: (allStops?.features ?? []).filter(
+                (feature) => !interchangeNames.has(String(feature.properties?.name ?? ""))
+            ),
+        }),
+        [allStops, interchangeNames]
+    );
+    // The airport terminal is not an interchange. Move only its DISPLAY dot
+    // and route pin to the line-offset endpoint; clicks still resolve to the
+    // original station coordinates stored in the all-stops feature properties.
+    const airportTerminal = useMemo(() => {
+        if (mode !== "krl" || !allStops || !mapPixels) return null;
+        const map = mapRef.current?.getMap?.();
+        const route = layers.find((layer) => layer.id === "A" || layer.id.startsWith("A:"))?.geometry.features.find(
+            (feature) => feature.geometry.coordinates.some(([lon]) => lon < 106.66)
+        );
+        const overviewRoute = overview?.features.find(
+            (feature) => (feature.properties as { color?: string } | null)?.color === "#2E2F70" &&
+                feature.geometry.coordinates.some(([lon]) => lon < 106.66)
+        );
+        const coordinates = (route ?? overviewRoute)?.geometry.coordinates as [number, number][] | undefined;
+        if (!map || !coordinates?.length || coordinates.length < 2) return null;
+        const airport = (allStops.features.find((feature) =>
+            feature.properties?.name === "Bandara Soekarno-Hatta"
+        )?.geometry as Point | undefined)?.coordinates;
+        if (!airport) return null;
+        const first = coordinates[0];
+        const last = coordinates.at(-1)!;
+        const terminalAtStart = Math.hypot(first[0] - airport[0], first[1] - airport[1]) <
+            Math.hypot(last[0] - airport[0], last[1] - airport[1]);
+        const end = terminalAtStart ? first : last;
+        const before = terminalAtStart ? coordinates[1] : coordinates.at(-2)!;
+        const offset = terminalAtStart ? -AIRPORT_LINE_OFFSET_PX : AIRPORT_LINE_OFFSET_PX;
+        const screen = airportTerminalScreenPoint(
+            [map.project(before).x, map.project(before).y],
+            [map.project(end).x, map.project(end).y],
+            offset
+        );
+        const point = map.unproject(screen);
+        return [point.lng, point.lat] as [number, number];
+    }, [mode, allStops, mapPixels, overview, layers, exactZoom]);
+    const displayStops = useMemo<FeatureCollection>(
+        () => !airportTerminal ? ordinaryStops : {
+            ...ordinaryStops,
+            features: ordinaryStops.features.map((feature) =>
+                feature.properties?.name === "Bandara Soekarno-Hatta"
+                    ? { ...feature, geometry: { type: "Point", coordinates: airportTerminal } }
+                    : feature
+            ),
+        },
+        [ordinaryStops, airportTerminal]
+    );
+    // An offset line stops 4px beside its raw endpoint. Join the two Duri
+    // approaches and the Manggarai end back to their displayed station pips.
+    // This affects pixels only; the route's geographic coordinates stay put.
+    const airportStationJoins = useMemo<FeatureCollection>(() => {
+        const empty: FeatureCollection = { type: "FeatureCollection", features: [] };
+        if (mode !== "krl" || !mapPixels) return empty;
+        const map = mapRef.current?.getMap?.();
+        if (!map) return empty;
+        const airport = layers.find((layer) => layer.id === "A" || layer.id.startsWith("A:"));
+        const features = airport?.geometry.features ??
+            (layers.length === 0 && previewLayer?.id === "A" ? previewLayer.geometry.features : null) ??
+            (layers.length === 0 && !previewLayer ? overview?.features.filter(
+                (feature) => (feature.properties as { color?: string } | null)?.color === "#2E2F70"
+            ) : null) ?? [];
+        const joinsVisible = !airport && !previewLayer ? !hideOverview : true;
+        if (!joinsVisible) return empty;
+        const pips = interchangeGeo.endpoints.features.filter((f) =>
+            f.properties?.routeId === "A" &&
+            (f.properties?.name === "Duri" || f.properties?.name === "Manggarai")
+        );
+        const joins = features.flatMap((feature) => {
+            const coords = feature.geometry.coordinates as [number, number][];
+            const offset = Number((feature.properties as { lineOffset?: number } | null)?.lineOffset ?? 0);
+            if (coords.length < 2 || !offset) return [];
+            return [true, false].flatMap((atStart) => {
+                const endpoint = atStart ? coords[0] : coords.at(-1)!;
+                const pip = pips.find((f) => {
+                    const [lon, lat] = (f.geometry as Point).coordinates;
+                    return Math.hypot((endpoint[0] - lon) * 110_700,
+                        (endpoint[1] - lat) * 110_540) < 45;
+                });
+                if (!pip) return [];
+                const before = atStart ? coords[1] : coords.at(-2)!;
+                const projectedBefore = map.project(before);
+                const projectedEnd = map.project(endpoint);
+                const shifted = airportTerminalScreenPoint(
+                    [projectedBefore.x, projectedBefore.y],
+                    [projectedEnd.x, projectedEnd.y],
+                    atStart ? -offset : offset
+                );
+                const projectedPip = map.project((pip.geometry as Point).coordinates as [number, number]);
+                const end = map.unproject(shifted);
+                const start = map.unproject([projectedPip.x, projectedPip.y]);
+                return [{
+                    type: "Feature" as const,
+                    properties: {},
+                    geometry: { type: "LineString" as const, coordinates: [
+                        [end.lng, end.lat], [start.lng, start.lat],
+                    ] },
+                }];
+            });
+        });
+        return { type: "FeatureCollection", features: joins };
+    }, [mode, mapPixels, layers, previewLayer, overview, interchangeGeo, exactZoom, hideOverview]);
 
     /**
      * The lines labels must dodge. Memoised because the axis lookup below
@@ -742,6 +1053,24 @@ const MainMapComponent = ({
         allStops,
         routeClusters.length,
     ]);
+
+    // A mode switch needs the full new network, not the default Jakarta-only
+    // initial camera: Bogor is far south. Calculate these bounds separately
+    // from selected-route bounds so clearing a route does not reframe the map.
+    const overviewBounds = useMemo(() => geometryBounds(overview ?? null), [overview]);
+    const lastOverviewFit = useRef(0);
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !overviewBounds || !overviewFitRequest ||
+            overviewFitRequest === lastOverviewFit.current || layers.length) return;
+        lastOverviewFit.current = overviewFitRequest;
+        map.fitBounds(overviewBounds, {
+            padding: { top: 64, bottom: 64, left: 64, right: 96 },
+            maxZoom: 12,
+            duration: 900,
+            essential: true,
+        });
+    }, [overviewBounds, overviewFitRequest, layers.length]);
 
     // Union of every drawn layer, so a multi-route stop view frames them all.
     const bounds = useMemo(() => {
@@ -834,13 +1163,20 @@ const MainMapComponent = ({
             // Clicking a GPU circle layer: hit-test by layer id, since these
             // are painted pixels rather than DOM nodes with their own handlers.
             interactiveLayerIds={[
+                // Interchanges are always drawn as the real connector pill; the
+                // two platforms are held at least
+                // `INTERCHANGE_MIN_SEPARATION_PX` apart at every zoom, so they
+                // stay distinguishable without a separate far-out symbol.
+                ...(interchangeGeo.pills.features.length
+                    ? ["interchange-hit", "interchange-endpoint", "interchange-label"]
+                    : []),
                 ...(routeClusters.length ? ["route-stop-pin"] : []),
                 ...(showAllStops && allStops && zoomLevel >= allStopsZoom
                     ? ["all-stops-circle"]
                     : []),
             ]}
             onClick={(e) => {
-                const f = e.features?.[0];
+                const f = e.features?.find((feature) => feature.layer.id.startsWith("interchange-")) ?? e.features?.[0];
 
                 // Nothing under the cursor: treat it as "dismiss".
                 //
@@ -852,6 +1188,19 @@ const MainMapComponent = ({
                 // selection by accident.
                 if (!f) {
                     onBackgroundClick?.();
+                    return;
+                }
+
+                // A pill, either endpoint, and its single label all resolve
+                // to the same station. Use the clicked coordinate so the
+                // popup opens by the touched platform, not at a midpoint.
+                if (f.layer?.id?.startsWith("interchange-")) {
+                    const id = String(f.properties?.stationId ?? "");
+                    const group = activeInterchanges.find((g) => g.id === id);
+                    if (group) {
+                        setStopFocusRequest((n) => n + 1);
+                        onStationClick?.(group.name, e.lngLat.lat, e.lngLat.lng);
+                    }
                     return;
                 }
 
@@ -873,10 +1222,18 @@ const MainMapComponent = ({
                 if (f.layer?.id === "all-stops-circle") {
                     const [lon, lat] = (f.geometry as Point).coordinates;
                     setStopFocusRequest((n) => n + 1);
+                    // The airport dot is displaced on screen only. Resolve its
+                    // real station anchor rather than searching around a pixel
+                    // offset that changes with zoom.
+                    const original = f.properties?.name === "Bandara Soekarno-Hatta"
+                        ? allStops?.features.find((feature) =>
+                            feature.properties?.name === "Bandara Soekarno-Hatta"
+                        )?.geometry as Point | undefined
+                        : undefined;
                     onStationClick?.(
                         String(f.properties?.name ?? ""),
-                        lat,
-                        lon
+                        original?.coordinates[1] ?? lat,
+                        original?.coordinates[0] ?? lon
                     );
                 }
             }}
@@ -884,7 +1241,8 @@ const MainMapComponent = ({
                 const f = e.features?.[0];
                 const id = f?.layer?.id;
                 const name =
-                    id === "all-stops-circle" || id === "route-stop-pin"
+                    id === "all-stops-circle" || id === "route-stop-pin" ||
+                    id?.startsWith("interchange-")
                         ? String(f?.properties?.name ?? "")
                         : null;
                 // Only re-render when the hovered stop actually changes;
@@ -905,9 +1263,26 @@ const MainMapComponent = ({
             // mobile layout, where the map shares the screen with a bottom sheet.
             style={{ width: "100%", height: "100%" }}
             mapStyle={styleUrl}
-            attributionControl={ATTRIBUTION_CONTROL}
+            // The built-in control is configured once at construction, so it
+            // cannot follow the mode; the one below is keyed on it instead.
+            attributionControl={false}
         >
-            <NavigationControl position="bottom-right" />
+            {/*
+              Order matters: MapLibre stacks the controls of a corner with the
+              LAST-added on top. Attribution has to be added first to sit at
+              the very bottom, under the zoom buttons, as the built-in one
+              always did. Both are keyed on the mode so that a remount (which
+              re-adds them) keeps that order -- remounting only the
+              attribution would re-add it last and float it above the zoom
+              buttons.
+            */}
+            <AttributionControl
+                key={"attr-" + mode}
+                position="bottom-right"
+                compact
+                customAttribution={ATTRIBUTION[mode]}
+            />
+            <NavigationControl key={"nav-" + mode} position="bottom-right" />
 
             {/*
               The whole network, faint, as context. One GPU-rendered GeoJSON
@@ -936,18 +1311,37 @@ const MainMapComponent = ({
                             // Colour travels in the feature, so all 700 lines
                             // stay a single draw call.
                             "line-color": ["get", "color"],
-                            "line-opacity": 0.35,
-                            // Thinner when zoomed out, where lines bunch up.
-                            "line-width": [
-                                "interpolate",
-                                ["linear"],
-                                ["zoom"],
-                                9,
-                                1,
-                                13,
-                                2.5,
-                            ],
+                            // Only the airport feature carries a signed screen-space
+                            // offset. OSM coordinates and station anchors stay put.
+                            "line-offset": ["coalesce", ["get", "lineOffset"], 0],
+                            // Match a selected route in KRL mode, even if an
+                            // old cached overview has no opacity/width fields.
+                            // Transjakarta's dense network remains faint.
+                            "line-opacity": mode === "krl" ? 1 : 0.35,
+                            "line-width":
+                                mode === "krl"
+                                    ? 3
+                                    : [
+                                          "interpolate",
+                                          ["linear"],
+                                          ["zoom"],
+                                          9,
+                                          1,
+                                          13,
+                                          2.5,
+                                      ],
                         }}
+                    />
+                </Source>
+            )}
+
+            {airportStationJoins.features.length > 0 && (
+                <Source id="airport-station-joins" type="geojson" data={airportStationJoins}>
+                    <Layer
+                        id="airport-station-join-line"
+                        type="line"
+                        layout={{ "line-cap": "round", "line-join": "round" }}
+                        paint={{ "line-color": "#2E2F70", "line-width": 3 }}
                     />
                 </Source>
             )}
@@ -975,6 +1369,7 @@ const MainMapComponent = ({
                             paint={{
                                 "line-color": `#${l.color}`,
                                 "line-width": 3,
+                                "line-offset": ["coalesce", ["get", "lineOffset"], 0],
                                 // Slight transparency so overlapping corridors
                                 // stay legible when many routes share a street.
                                 "line-opacity": layers.length > 1 ? 0.75 : 1,
@@ -1001,6 +1396,7 @@ const MainMapComponent = ({
                         paint={{
                             "line-color": `#${previewLayer.color}`,
                             "line-width": 3,
+                            "line-offset": ["coalesce", ["get", "lineOffset"], 0],
                             "line-opacity": 1,
                         }}
                     />
@@ -1013,7 +1409,7 @@ const MainMapComponent = ({
               6,437 React components plus an O(n^2) clustering pass.
             */}
             {allStops && (
-                <Source id="all-stops" type="geojson" data={allStops}>
+                <Source id="all-stops" type="geojson" data={displayStops}>
                     {/*
                       Dot and label are one symbol here too, for the same
                       reason as the route stops: a circle layer is invisible to
@@ -1048,15 +1444,7 @@ const MainMapComponent = ({
                             // the original 14->17 ramp backwards instead would
                             // have put z12 at 5.2px, which is the
                             // too-small-to-hit problem all over again.
-                            "icon-size": [
-                                "interpolate",
-                                ["linear"],
-                                ["zoom"],
-                                12,
-                                0.62,
-                                17,
-                                1.25,
-                            ],
+                            "icon-size": STATION_ICON_SIZE,
                             // Keeps the hover swap from being dropped by the
                             // collision index when dots are dense.
                             "icon-padding": 0,
@@ -1071,7 +1459,7 @@ const MainMapComponent = ({
                         // across the whole city at once; the dots read as a
                         // network at that scale, the names only become useful
                         // once you are zoomed into a neighbourhood.
-                        minzoom={14}
+                        minzoom={allStopsLabelZoom}
                         layout={{
                             visibility: showAllStops ? "visible" : "none",
                             "text-field": ["get", "name"],
@@ -1105,9 +1493,153 @@ const MainMapComponent = ({
                 </Source>
             )}
 
-            {(forcePins || zoomLevel > zoomThreshold) && routeClusters.length > 0 && (
+            {interchangeGeo.pills.features.length > 0 && (
+                <>
+                    <Source id="interchange-pill" type="geojson" data={interchangeHoverGeo.pills}>
+                        {/*
+                          The connector reads as part of the stop symbol
+                          family, and matches an ordinary dot exactly: a 12s
+                          outline over an 8s body leaves a 2s ring, the same
+                          proportions as `all-stop-dot` (12px circle, 2px
+                          stroke) at every zoom.
+
+                          The body is the app's `bg-jakarta` navy -- the same
+                          `STOP_INK` an ordinary dot uses -- so the bridge reads
+                          as part of the stop symbol family rather than a
+                          separate colour.
+                        */}
+                        <Layer
+                            id="interchange-outline"
+                            type="line"
+                            minzoom={allStopsZoom}
+                            layout={{
+                                visibility: visibleInterchanges ? "visible" : "none",
+                                "line-cap": "round",
+                                "line-join": "round",
+                            }}
+                            paint={{ "line-color": STOP_RING, "line-width": stationDotSize() }}
+                        />
+                        <Layer
+                            id="interchange-fill"
+                            type="line"
+                            minzoom={allStopsZoom}
+                            layout={{
+                                visibility: visibleInterchanges ? "visible" : "none",
+                                "line-cap": "round",
+                                "line-join": "round",
+                            }}
+                            paint={{ "line-color": STOP_INK, "line-width": stationDotSize(0, 8 / 12) }}
+                        />
+                        <Layer
+                            id="interchange-hover-halo"
+                            type="line"
+                            minzoom={allStopsZoom}
+                            filter={["==", ["get", "hovered"], 1]}
+                            layout={{
+                                "line-cap": "round",
+                                "line-join": "round",
+                            }}
+                            paint={{
+                                "line-color": STOP_INK,
+                                "line-width": stationDotSize(0, 1.75),
+                                "line-opacity": 0.22,
+                            }}
+                        />
+                        <Layer
+                            id="interchange-hit"
+                            type="line"
+                            minzoom={allStopsZoom}
+                            layout={{ visibility: visibleInterchanges ? "visible" : "none" }}
+                            paint={{ "line-color": STOP_INK, "line-width": 24, "line-opacity": 0.01 }}
+                        />
+                    </Source>
+                    <Source id="interchange-endpoints" type="geojson" data={interchangeHoverGeo.endpoints}>
+                        <Layer
+                            id="interchange-endpoint"
+                            type="circle"
+                            minzoom={allStopsZoom}
+                            layout={{ visibility: visibleInterchanges ? "visible" : "none" }}
+                            paint={{
+                                // Same ring proportion as a station dot: the dot
+                                // is 12s across with a 2s stroke, so radius 6s
+                                // and stroke 2s. A fixed 1.5px stroke thinned
+                                // out at low zoom and thickened at high zoom.
+                                "circle-radius": stationDotSize(0, 0.5),
+                                "circle-color": ["get", "color"],
+                                "circle-stroke-width": stationDotSize(0, 1 / 6),
+                                "circle-stroke-color": STOP_RING,
+                            }}
+                        />
+                        {/*
+                          Hover: invert each platform pip, matching how the
+                          route stop pins answer the cursor. Separate layer so
+                          the zoom-driven radius above stays untouched.
+                        */}
+                        <Layer
+                            id="interchange-endpoint-hover"
+                            type="circle"
+                            minzoom={allStopsZoom}
+                            filter={["==", ["get", "hovered"], 1]}
+                            paint={{
+                                "circle-radius": stationDotSize(0, 0.52),
+                                "circle-color": ["get", "color"],
+                                "circle-stroke-width": stationDotSize(0, 0.22),
+                                "circle-stroke-color": STOP_INK,
+                            }}
+                        />
+                    </Source>
+                    <Source id="interchange-label-source" type="geojson" data={interchangeHoverGeo.labels}>
+                        <Layer
+                            id="interchange-label"
+                            type="symbol"
+                            minzoom={showAllStops ? allStopsLabelZoom : 0}
+                            layout={{
+                                visibility: visibleInterchanges ? "visible" : "none",
+                                "text-field": ["get", "name"],
+                                "text-font": LABEL_FONT,
+                                "text-size": 12,
+                                "text-variable-anchor": ["top", "bottom", "left", "right"],
+                                // Tighter than before (1.2) because the
+                                // connector shrank; at 1.2 the label floated
+                                // ~9px clear of the pill.
+                                "text-radial-offset": 0.9,
+                                "text-allow-overlap": false,
+                                "symbol-sort-key": ["-", 0, ["get", "routes"]],
+                            }}
+                            paint={{
+                                "text-color": "#0C1B2A",
+                                "text-halo-color": "#FFFFFF",
+                                "text-halo-width": 2,
+                            }}
+                        />
+                    </Source>
+                </>
+            )}
+
+            {/*
+              `>=`, not `>`: `zoomLevel` is floored, so a camera settled at
+              z10.4 reports 10. A strict `>` hid every route pin the moment a
+              station's routes were framed -- for KRL that fit lands near
+              z10.4, so the dots flashed and vanished right after "Tampilkan
+              rute di peta".
+            */}
+            {(forcePins || zoomLevel >= zoomThreshold) && routeClusters.length > 0 && (
                 <StopMarkers
-                    clusters={routeClusters}
+                    clusters={routeClusters.filter((cluster) => {
+                        const group = activeInterchanges.find((g) => g.name === cluster.name);
+                        if (!group) return true;
+                        // The connector pill represents the whole station, so
+                        // the representative pin that sits on one of its
+                        // anchors would only double-draw that platform.
+                        return !group.anchors.some((anchor) =>
+                            Math.abs(anchor.lat - cluster.stop.stop_lat) < 1e-6 &&
+                            Math.abs(anchor.lon - cluster.stop.stop_lon) < 1e-6
+                        );
+                    }).map((cluster) =>
+                        airportTerminal && cluster.name === "Bandara Soekarno-Hatta"
+                            ? { ...cluster, lon: airportTerminal[0], lat: airportTerminal[1] }
+                            : cluster
+                    )}
                     // The card-focused stop is highlighted like a selected one,
                     // but without the popup.
                     activeName={activeStop?.name ?? focusPoint?.name ?? null}
@@ -1127,8 +1659,10 @@ const MainMapComponent = ({
             */}
             {activeStop && stopPopup && (
                 <Popup
-                    longitude={activeStop.lon}
-                    latitude={activeStop.lat}
+                    longitude={activeStop.name === "Bandara Soekarno-Hatta" && airportTerminal
+                        ? airportTerminal[0] : activeStop.lon}
+                    latitude={activeStop.name === "Bandara Soekarno-Hatta" && airportTerminal
+                        ? airportTerminal[1] : activeStop.lat}
                     offset={14}
                     padding={{ top: 12, right: 12, bottom: 12, left: 12 }}
                     closeButton={false}

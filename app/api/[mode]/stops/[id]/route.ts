@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getStationDetail } from "@/lib/gtfs";
+import { getStationDetail, parseMode } from "@/lib/gtfs";
 
 /**
  * GET /api/gtfs/stops/:id
@@ -12,12 +12,13 @@ export const revalidate = 86400;
 
 export async function GET(
     _request: Request,
-    { params }: { params: Promise<{ id: string }> }
+    { params }: { params: Promise<{ mode: string; id: string }> }
 ) {
-    const { id } = await params;
+    const { id, mode: rawMode } = await params;
+    const mode = parseMode(rawMode);
 
     try {
-        const station = await getStationDetail(decodeURIComponent(id));
+        const station = await getStationDetail(decodeURIComponent(id), mode);
 
         if (!station) {
             return NextResponse.json(

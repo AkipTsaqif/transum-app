@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { resolveStation } from "@/lib/gtfs";
+import { parseMode, resolveStation } from "@/lib/gtfs";
 
 /**
  * GET /api/gtfs/stops/resolve?name=&lat=&lon=
@@ -13,7 +13,11 @@ import { resolveStation } from "@/lib/gtfs";
  */
 export const revalidate = 86400;
 
-export async function GET(request: Request) {
+export async function GET(
+    request: Request,
+    { params }: { params: Promise<{ mode: string }> }
+) {
+    const mode = parseMode((await params).mode);
     const { searchParams } = new URL(request.url);
     const name = searchParams.get("name");
     const rawLat = searchParams.get("lat");
@@ -39,7 +43,7 @@ export async function GET(request: Request) {
     }
 
     try {
-        const station = await resolveStation(name, lat, lon);
+        const station = await resolveStation(name, lat, lon, mode);
 
         if (!station) {
             return NextResponse.json(

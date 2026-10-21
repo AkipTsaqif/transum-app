@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRouteDetail } from "@/lib/gtfs";
+import { getRouteDetail, parseMode } from "@/lib/gtfs";
 
 /**
  * GET /api/gtfs/routes/:id
@@ -13,12 +13,13 @@ export const revalidate = 86400;
 export async function GET(
     _request: Request,
     // Next.js 15: dynamic route params are async.
-    { params }: { params: Promise<{ id: string }> }
+    { params }: { params: Promise<{ mode: string; id: string }> }
 ) {
-    const { id } = await params;
+    const { id, mode: rawMode } = await params;
+    const mode = parseMode(rawMode);
 
     try {
-        const detail = await getRouteDetail(decodeURIComponent(id));
+        const detail = await getRouteDetail(decodeURIComponent(id), mode);
 
         if (!detail) {
             return NextResponse.json(
