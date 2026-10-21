@@ -1,13 +1,19 @@
 {
   "source": "OpenStreetMap relation full API + Overpass station nodes",
   "attribution": "© OpenStreetMap contributors",
-  "osmTimestamp": "2026-10-19T23:49:34Z",
-  "syncedAt": "2026-10-19T23:50:46.172Z",
+  "osmTimestamp": "2026-10-21T00:54:55Z",
+  "syncedAt": "2026-10-21T00:56:11.601Z",
   "relations": [
     17193008,
     2922237,
     2922163,
-    15094545
+    15094545,
+    17193463,
+    2922235,
+    16877210,
+    16877212,
+    16877211,
+    16877213
   ],
   "deferredRelations": [
     15097496,

@@ -8,9 +8,9 @@ const stops = JSON.parse(readFileSync("data/krl/stops-geo.json", "utf8")) as Fea
 
 test("one shared station yields two distinct physical endpoints and one label", () => {
     const groups = interchangesFromStops(stops);
-    assert.equal(groups.length, 1);
-    assert.equal(groups[0].name, "Kampung Bandan");
-    const { pills, labels, endpoints } = interchangeFeatures(groups);
+    assert.equal(groups.length, 4); // Jakarta Kota, Kampung Bandan, Duri, Manggarai
+    const group = groups.find((candidate) => candidate.name === "Kampung Bandan")!;
+    const { pills, labels, endpoints } = interchangeFeatures([group]);
     assert.equal(pills.features.length, 1);
     assert.equal(labels.features.length, 1);
     assert.equal(endpoints.features.length, 2);
@@ -24,8 +24,9 @@ test("one shared station yields two distinct physical endpoints and one label", 
 
 test("three platforms share one label and connect via two branches", () => {
     const groups = interchangesFromStops(stops);
-    const extended = [{ ...groups[0], anchors: [
-        ...groups[0].anchors,
+    const group = groups.find((candidate) => candidate.name === "Kampung Bandan")!;
+    const extended = [{ ...group, anchors: [
+        ...group.anchors,
         { routeId: "X", stopId: "X01", lat: -6.1326, lon: 106.8288, color: "#123456" },
     ] }];
     const { pills, labels, endpoints } = interchangeFeatures(extended);
@@ -34,7 +35,7 @@ test("three platforms share one label and connect via two branches", () => {
     assert.equal(endpoints.features.length, 3);
     for (const segment of pills.features) {
         assert.equal(segment.geometry.coordinates.length, 2);
-        assert.equal(segment.properties?.stationId, groups[0].id);
+        assert.equal(segment.properties?.stationId, group.id);
     }
 });
 
@@ -46,7 +47,9 @@ test("far-out stations display two distinguishable endpoints on every zoom", () 
 });
 
 test("ordinary stops do not grow interchange markers", () => {
-    const ordinary = { ...stops, features: stops.features.filter((f) => f.properties?.name !== "Kampung Bandan") };
+    const ordinary = { ...stops, features: stops.features.filter((f) =>
+        !["Jakarta Kota", "Kampung Bandan", "Duri", "Manggarai"].includes(String(f.properties?.name))
+    ) };
     assert.deepEqual(interchangesFromStops(ordinary), []);
     assert.deepEqual(interchangesFromStops(null), []);
 });

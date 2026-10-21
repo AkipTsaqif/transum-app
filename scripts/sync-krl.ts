@@ -20,8 +20,13 @@ interface LineConfig {
     short: string;
     color: string;
     relations: number[];
+    longName: string;
+    /** Full-racket relations must retain member order and repeated stops. */
+    orderedWays?: boolean;
     oneWay?: Record<string, number>;
     canonicalByName?: Record<string, string>;
+    /** One pair of main directions, then optional branch variants. */
+    mainDirections?: number;
 }
 
 const C_STATIONS: Record<string, string> = {
@@ -59,6 +64,7 @@ const LINES: LineConfig[] = [
         short: "TP",
         color: "EF509A",
         relations: [17193008, 2922237],
+        longName: "Jakarta Kota - Tanjung Priuk",
         oneWay: { TP04: 1 },
     },
     {
@@ -69,7 +75,28 @@ const LINES: LineConfig[] = [
         // relations are intentionally not emitted until their service
         // classification is independently verified.
         relations: [2922163, 15094545],
+        longName: "Cikarang - Kampung Bandan",
+        orderedWays: true,
         canonicalByName: C_STATIONS,
+    },
+    {
+        id: "T",
+        short: "T",
+        // Tangerang line colour in the KAI Commuter Wikipedia line module.
+        color: "C25F28",
+        relations: [17193463, 2922235],
+        longName: "Duri - Tangerang",
+        canonicalByName: { "rawa buaya": "T06" },
+    },
+    {
+        id: "B",
+        short: "B",
+        // OSM route master 16877214 publishes #ec2329 for the Bogor line.
+        color: "EC2329",
+        relations: [16877210, 16877212, 16877211, 16877213],
+        longName: "Jakarta Kota - Bogor / Nambo",
+        mainDirections: 2,
+        canonicalByName: { "pasar minggu baru": "B13" },
     },
 ];
 
@@ -84,10 +111,10 @@ const MIRRORS = [
 ];
 const USER_AGENT =
     "transum-app/0.1 (+https://github.com/AkipTsaqif/transum-app) krl-sync";
-const STATION_BBOX = "-6.28,106.79,-6.10,107.17";
+const STATION_BBOX = "-6.62,106.62,-6.10,107.17";
 const MAX_JOIN_GAP_M = 20;
 const STATION_MATCH_M = 1000;
-const CLUSTER_M = 100;
+const CLUSTER_M = 150;
 const STOP_ROLES = new Set(["stop", "stop_entry_only", "stop_exit_only"]);
 
 // ---------------------------------------------------------------------------
@@ -184,7 +211,7 @@ async function fetchStationNodes(): Promise<{
                     const named = new Set(parsed.elements.map((n) => n.tags?.name));
                     // Mirrors sometimes return a valid JSON body from an empty
                     // or badly stale snapshot. Both endpoints must exist.
-                    if (named.has("Jakarta Kota") && named.has("Cikarang")) {
+                    if (named.has("Jakarta Kota") && named.has("Cikarang") && named.has("Tangerang") && named.has("Bogor") && named.has("Nambo")) {
                         return {
                             nodes: parsed.elements,
                             timestamp: parsed.osm3s?.timestamp_osm_base ?? "",
@@ -395,13 +422,71 @@ function stationId(cfg: LineConfig, node: OsmNode): string {
     return ref.replace(/\s+/g, "");
 }
 
+function nearestLineIndex(line: LngLat[], point: LngLat): number {
+    let best = 0;
+    let distance = Infinity;
+    for (let index = 0; index < line.length; index++) {
+        const d = metres(line[index], point);
+        if (d < distance) {
+            distance = d;
+            best = index;
+        }
+    }
+    return best;
+}
+
+/** Remove overhanging buffer-stop track past the first/last terminal call.
+ * OSM routes include real track beyond the platform, which made the brown
+ * Tangerang line continue past both end markers. Keep the station itself and
+ * cut only the geometry beyond it. */
+function trimLineToStops(line: LngLat[], calls: StationCall[]): LngLat[] {
+    // Trim only what is beyond the first and final relation stop. The
+    // endpoint itself is the relation stop coordinate, so the line ends at
+    // the station marker rather than at a nearby buffer-stop track vertex.
+    const first = calls[0];
+    const last = calls.at(-1)!;
+
+    if (first.id === last.id) {
+        // A racket starts and ends at the same station (Cikarang). Searching
+        // the whole line for its nearest vertex would collapse the loop, so
+        // search only the two ends. The slice between them keeps the loop and
+        // cuts the buffer-stop spurs past the shared terminal.
+        const window = Math.max(8, Math.floor(line.length * 0.1));
+        const along = (index: number) => metres(line[index], [first.lon, first.lat]);
+        let start = 0;
+        for (let i = 1; i <= window && i < line.length; i++) {
+            if (along(i) < along(start)) start = i;
+        }
+        let end = line.length - 1;
+        for (let i = line.length - 2; i >= line.length - window - 1 && i >= 0; i--) {
+            if (along(i) < along(end)) end = i;
+        }
+        if (start >= end) return line;
+        const loop = line.slice(start, end + 1);
+        loop[0] = [first.lon, first.lat];
+        loop[loop.length - 1] = [first.lon, first.lat];
+        return loop;
+    }
+
+    const startIndex = nearestLineIndex(line, [first.lon, first.lat]);
+    const endIndex = nearestLineIndex(line, [last.lon, last.lat]);
+    const from = Math.min(startIndex, endIndex);
+    const to = Math.max(startIndex, endIndex);
+    const sliced = line.slice(from, to + 1);
+    const firstCall = startIndex <= endIndex ? first : last;
+    const lastCall = startIndex <= endIndex ? last : first;
+    sliced[0] = [firstCall.lon, firstCall.lat];
+    sliced[sliced.length - 1] = [lastCall.lon, lastCall.lat];
+    return sliced;
+}
+
 function gather(
     cfg: LineConfig,
     relation: OsmRelation,
     nodes: Map<number, OsmNode>,
     ways: Map<number, OsmWay>
 ): Direction {
-    const line = chainWays(relation, ways, nodes, cfg.id === "C");
+    const line = chainWays(relation, ways, nodes, cfg.orderedWays ?? false);
     const stopMembers = relation.members.filter(
         (member) => member.type === "node" && STOP_ROLES.has(member.role)
     );
@@ -461,8 +546,16 @@ function uniqueStations(directions: Direction[], cfg: LineConfig): RouteStation[
         }
     }
     const list = [...byId.values()].map(({ count: _count, ...station }) => station);
-    if (cfg.id === "C") {
-        list.sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)));
+    if (cfg.id === "C" || cfg.id === "B") {
+        // Branch stops are not on the Bogor trunk: keep them after the main
+        // numbered stations instead of projecting them to a nearby trunk
+        // segment, which interleaves Nambo between Depok and Citayam.
+        const order = cfg.id === "B"
+            ? (id: string) => id.startsWith("b")
+                ? 100 + Number(id.slice(1))
+                : Number(id.slice(1))
+            : (id: string) => Number(id.slice(1));
+        list.sort((a, b) => order(a.id) - order(b.id));
     } else {
         const line = directions[0].line;
         list.sort(
@@ -618,7 +711,14 @@ async function main() {
         const routeStops = uniqueStations(directions, cfg);
         const placed = new Map<string, { lat: number; lon: number }>();
         for (const station of routeStops) {
-            const position = locate(station, directions[0].line, stationData.nodes);
+            // A branch-only stop is not on the first (Bogor) trunk shape.
+            // Snap it to the direction that actually calls there; otherwise
+            // Cibinong/Nambo get projected onto the distant Bogor track.
+            const serving = directions.find((direction) =>
+                direction.calls.some((call) => call.id === station.id)
+            );
+            if (!serving) throw new Error(`${cfg.id}: no relation serves ${station.id}`);
+            const position = locate(station, serving.line, stationData.nodes);
             placed.set(station.id, { lat: position.lat, lon: position.lon });
             station.lat = position.lat;
             station.lon = position.lon;
@@ -630,13 +730,39 @@ async function main() {
             }));
         }
 
-        const longName = cfg.id === "C" ? "Cikarang - Kampung Bandan" : "Jakarta Kota - Tanjung Priuk";
-        const variants = directions.map((direction, index) => routeVariant(cfg, direction, index));
+        const longName = cfg.longName;
+        const variants = directions.map((direction, index) => ({
+            ...routeVariant(cfg, direction, index),
+            ...(cfg.mainDirections && index >= cfg.mainDirections
+                ? { kind: "alihan" as const, via: "Nambo" }
+                : {}),
+        }));
+        // After station placement, trim only the two terminal overhangs. The
+        // Tangerang relation continues to buffer-stop tracks past both ends;
+        // keeping those made the brown line overshoot its station markers.
+        const trimmedDirections = directions.map((direction) => {
+            const terminals = direction.calls.filter(
+                (_, i) => i === 0 || i === direction.calls.length - 1
+            );
+            return terminals.length === 2
+                ? { ...direction, line: trimLineToStops(direction.line, terminals) }
+                : direction;
+        });
         const geometryByShape = Object.fromEntries(
-            directions.map((direction, index) => [
-                `${cfg.id}-${index}`,
-                direction.line.map(([lon, lat]) => [round(lon), round(lat)] as LngLat),
-            ])
+            trimmedDirections.map((direction, index) => {
+                const terminals = direction.calls.filter((call, i) => i === 0 || i === direction.calls.length - 1);
+                // A racket starts and ends at the same station; trimming that
+                // would erase the entire loop. Only cut distinct terminal
+                // stops (Duri�Tangerang and similar open lines).
+                const openRoute = terminals.length === 2 && terminals[0].id !== terminals[1].id;
+                const trimmed = openRoute
+                    ? trimLineToStops(direction.line, terminals)
+                    : direction.line;
+                return [
+                    `${cfg.id}-${index}`,
+                    trimmed.map(([lon, lat]) => [round(lon), round(lat)] as LngLat),
+                ];
+            })
         );
         const detail = {
             route_id: cfg.id,
@@ -666,7 +792,11 @@ async function main() {
 
         // TP uses one shared corridor. C has two complete full-racket shapes,
         // both of which belong in the city-wide overview by default.
-        const overviewDirections = cfg.id === "C" ? directions : directions.slice(0, 1);
+        const overviewDirections = cfg.id === "C"
+            ? trimmedDirections
+            : cfg.mainDirections
+              ? [trimmedDirections[0], trimmedDirections[cfg.mainDirections]]
+              : trimmedDirections.slice(0, 1);
         for (const direction of overviewDirections) {
             overviewFeatures.push({
                 type: "Feature",
@@ -729,8 +859,12 @@ async function main() {
         deferredRelations: [15097496, 15097497, 15097498, 15097499, 15097500, 15097501, 15097502, 15097503, 15097504, 15097505, 15097506, 15097507],
     });
 
-    if (stationIndex.length !== 30) {
-        throw new Error(`Expected 30 physical stations (26 C + 5 TP - shared Kampung Bandan), got ${stationIndex.length}`);
+    // Two physical interchanges are shared by different line pairs: Kampung
+    // Bandan (TP/C), Duri (C/T), and several Bogor-line interchanges share
+    // physical stations across lines. Validate those explicitly below rather
+    // than assuming a fixed global count when a new line is added.
+    if (stationIndex.length < 60) {
+        throw new Error(`Expected at least 60 physical KRL stations, got ${stationIndex.length}`);
     }
     const cStations = stationIndex.filter((station) => station.routes.includes("C"));
     if (cStations.length !== 26) {
@@ -746,6 +880,34 @@ async function main() {
         (station) => station.name === "Kampung Bandan" && station.routes.includes("C") && station.routes.includes("TP")
     );
     if (shared.length !== 1) throw new Error("Kampung Bandan was not unified between TP and C");
+    const duri = stationIndex.filter(
+        (station) => station.name === "Duri" && station.routes.includes("C") && station.routes.includes("T")
+    );
+    if (duri.length !== 1) throw new Error("Duri was not unified between C and T");
+    const tRoute = outputFiles.get(path.join("routes", "T.json")) as {
+        stops: { stop_id: string }[];
+        variants: { stopIds: string[] }[];
+    };
+    if (
+        tRoute.stops.length !== 11 ||
+        tRoute.variants.length !== 2 ||
+        tRoute.variants[0].stopIds[0] !== "T01" ||
+        tRoute.variants[0].stopIds.at(-1) !== "T11" ||
+        tRoute.variants[1].stopIds[0] !== "T11" ||
+        tRoute.variants[1].stopIds.at(-1) !== "T01"
+    ) throw new Error("Tangerang line must have both 11-stop Duri–Tangerang directions");
+    const bogor = outputFiles.get(path.join("routes", "B.json")) as {
+        stops: { stop_id: string; stop_name: string }[];
+        variants: { stopIds: string[] }[];
+    };
+    if (!bogor || bogor.variants.length !== 4 ||
+        !bogor.stops.some((station) => station.stop_name === "Bogor") ||
+        !bogor.stops.some((station) => station.stop_name === "Nambo") ||
+        bogor.variants[0].stopIds[0] !== "B01" ||
+        bogor.variants[0].stopIds.at(-1) !== "B26" ||
+        bogor.variants[1].stopIds[0] !== "B26" ||
+        bogor.variants[1].stopIds.at(-1) !== "B01"
+    ) throw new Error("Bogor line must include both Bogor and Nambo branches");
     const senen = cRoute.variants.map((variant) => variant.stopIds.includes("C04"));
     if (senen[0] !== true || senen[1] !== false) {
         throw new Error("Pasar Senen must only be a stop on the via Pasar Senen racket");

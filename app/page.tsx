@@ -43,12 +43,27 @@ const MODES: { value: TransitMode | "mrt"; label: string; ready: boolean }[] = [
     { value: "krl", label: "KRL Commuter Line", ready: true },
     { value: "mrt", label: "MRT Jakarta", ready: false },
 ];
+/**
+ * Baked data is served with an hour-long browser cache in production, which is
+ * correct there: it only changes at deploy. In development that backfires.
+ * After `npm run sync:krl` rewrites `data/`, the browser keeps serving the old
+ * JSON, and a hard reload does NOT clear `fetch()` responses -- only the
+ * document. The symptom was confusing: a private window showed the new
+ * geometry while the normal window kept the old one across server restarts.
+ * Bypass the HTTP cache in development only; production is untouched.
+ */
+const NO_CACHE_IN_DEV: RequestInit =
+    process.env.NODE_ENV === "production" ? {} : { cache: "no-store" };
+
 const modeLabel = (m: TransitMode) =>
     MODES.find((x) => x.value === m)?.label ?? m;
 
 export default function Index() {
     // Which dataset the app is showing; also the /api/<mode>/ path segment.
     const [mode, setMode] = useState<TransitMode>("gtfs");
+    // A request number, not a boolean: each deliberate mode switch asks the
+    // map to fit the new network exactly once, after its overview has loaded.
+    const [overviewFitRequest, setOverviewFitRequest] = useState(0);
     const [searchQuery, setSearchQuery] = useState<string>("");
 
     const [routes, setRoutes] = useState<RouteSummary[]>([]);
@@ -171,6 +186,7 @@ export default function Index() {
             setRoutes([]);
             setSearchQuery("");
             setStopHits([]);
+            setOverviewFitRequest((n) => n + 1);
             setMode(next);
         },
         [mode]
@@ -184,7 +200,7 @@ export default function Index() {
             setRoutesLoading(true);
             setRoutesError(null);
             try {
-                const res = await fetch(`/api/${mode}/routes`);
+                const res = await fetch(`/api/${mode}/routes`, NO_CACHE_IN_DEV);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data: RouteSummary[] = await res.json();
                 if (!cancelled) setRoutes(data);
@@ -212,7 +228,7 @@ export default function Index() {
 
         (async () => {
             try {
-                const res = await fetch(`/api/${mode}/overview`);
+                const res = await fetch(`/api/${mode}/overview`, NO_CACHE_IN_DEV);
                 if (!res.ok) return;
                 const data: ShapeCollection = await res.json();
                 if (!cancelled) setOverview(data);
@@ -245,7 +261,7 @@ export default function Index() {
             try {
                 const res = await fetch(
                     `/api/${mode}/routes/${encodeURIComponent(hoverRouteId)}`,
-                    { signal: ctrl.signal }
+                    { ...NO_CACHE_IN_DEV, signal: ctrl.signal }
                 );
                 if (!res.ok) return;
                 const data: RouteDetail = await res.json();
@@ -288,7 +304,7 @@ export default function Index() {
             try {
                 const res = await fetch(
                     `/api/${mode}/routes/${encodeURIComponent(selectedRouteId)}`,
-                    { signal: ctrl.signal }
+                    { ...NO_CACHE_IN_DEV, signal: ctrl.signal }
                 );
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data: RouteDetail = await res.json();
@@ -343,6 +359,7 @@ export default function Index() {
 
         try {
             const res = await fetch(`/api/${mode}/stops/resolve?${query}`, {
+                ...NO_CACHE_IN_DEV,
                 signal: ctrl.signal,
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -391,7 +408,7 @@ export default function Index() {
                 station.routes.map(async (r) => {
                     const g = await fetch(
                         `/api/${mode}/routes/${encodeURIComponent(r.route_id)}`,
-                        { signal: ctrl.signal }
+                        { ...NO_CACHE_IN_DEV, signal: ctrl.signal }
                     );
                     if (!g.ok) return null;
                     return (await g.json()) as RouteDetail;
@@ -426,6 +443,7 @@ export default function Index() {
         (async () => {
             try {
                 const res = await fetch(`/api/${mode}/stops/geo`, {
+                    ...NO_CACHE_IN_DEV,
                     signal: ctrl.signal,
                 });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -498,7 +516,8 @@ export default function Index() {
             // the non-overlapping option saved in commit 46a9647.
             return stationRoutes.map((r) => {
                 const trunks = (r.variants ?? [])
-                    .filter((v) => v.kind === "utama")
+                    .filter((v) => v.kind === "utama" ||
+                        (r.route_id === "B" && v.kind === "alihan"))
                     .map((v) => r.geometryByShape?.[v.shape_id])
                     .filter((c): c is [number, number][] => Boolean(c?.length));
                 const use: [number, number][][] = trunks.length
@@ -535,7 +554,10 @@ export default function Index() {
         // shared stretches, is saved in commit 46a9647 for easy restoration.
         const lines: [number, number][][] = detail.variants
             .filter((v) =>
-                variantTripId ? v.trip_id === variantTripId : v.kind === "utama"
+                variantTripId
+                    ? v.trip_id === variantTripId
+                    : v.kind === "utama" ||
+                      (detail.route_id === "B" && v.kind === "alihan")
             )
             .map((v) => lineFor(v.shape_id))
             .filter((c): c is [number, number][] => Boolean(c?.length));
@@ -587,7 +609,8 @@ export default function Index() {
 
         // Match the selected-route map: preview every complete trunk shape.
         const trunks = (hoverDetail.variants ?? [])
-            .filter((v) => v.kind === "utama")
+            .filter((v) => v.kind === "utama" ||
+                (hoverDetail.route_id === "B" && v.kind === "alihan"))
             .map((v) => hoverDetail.geometryByShape?.[v.shape_id])
             .filter((c): c is [number, number][] => Boolean(c?.length));
         const lines: [number, number][][] = trunks.length
@@ -637,7 +660,8 @@ export default function Index() {
             const out: RouteStop[] = [selected];
             for (const r of stationRoutes) {
                 const trunk = (r.variants ?? []).filter(
-                    (v) => v.kind === "utama"
+                    (v) => v.kind === "utama" ||
+                        (r.route_id === "B" && v.kind === "alihan")
                 );
                 const allow = trunk.length
                     ? new Set(trunk.flatMap((v) => v.stopIds))
@@ -722,7 +746,7 @@ export default function Index() {
             try {
                 const res = await fetch(
                     `/api/${mode}/search?q=${encodeURIComponent(q)}`,
-                    { signal: ctrl.signal }
+                    { ...NO_CACHE_IN_DEV, signal: ctrl.signal }
                 );
                 if (!res.ok) return;
                 setStopHits((await res.json()) as StationSearchHit[]);
@@ -1063,6 +1087,7 @@ export default function Index() {
                     forcePins={previewEnds.length > 0}
                     routeStops={pinStops}
                     overview={overview}
+                    overviewFitRequest={overviewFitRequest}
                     allStops={allStops}
                     showAllStops={showAllStops}
                     onStationClick={handleStationClick}

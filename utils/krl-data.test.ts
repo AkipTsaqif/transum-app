@@ -8,6 +8,9 @@ const load = <T>(name: string): T =>
 
 const c = load<RouteDetail>("routes/C.json");
 const tp = load<RouteDetail>("routes/TP.json");
+const t = load<RouteDetail>("routes/T.json");
+const b = load<RouteDetail>("routes/B.json");
+const namboshapeEnd = (shape: [number, number][]) => shape.at(-1)!;
 const stations = load<StationIndexEntry[]>("stops.json");
 const overview = load<{
     features: {
@@ -38,7 +41,7 @@ test("C full rackets retain ordered repeated calls and one-way Pasar Senen", () 
 test("C overview includes both continuous racket shapes", () => {
     const meters = (a: [number, number], b: [number, number]) =>
         Math.hypot((a[0] - b[0]) * 110_700, (a[1] - b[1]) * 110_540);
-    assert.equal(overview.features.length, 3); // TP + both C rackets
+    assert.equal(overview.features.length, 6); // TP + both C rackets + T + B main/branch
     for (const v of c.variants) {
         const shape = c.geometryByShape[v.shape_id];
         assert.ok(shape.length > 1000);
@@ -52,12 +55,28 @@ test("C overview includes both continuous racket shapes", () => {
         assert.equal(feature.properties.opacity, 1);
         assert.equal(feature.properties.width, 3);
     }
+    // One shared Cikarang terminal: a racket loops back to the same station,
+    // so both overview ends must sit on that station instead of a buffer stop.
+    const cikarang = c.stops.find((stop) => stop.stop_id === "C26")!;
+    const cikarangOverview = overview.features.filter(
+        (feature) => feature.properties.color === "#26BAED"
+    );
+    assert.equal(cikarangOverview.length, 2);
+    for (const feature of cikarangOverview) {
+        const ends = [feature.geometry.coordinates[0], feature.geometry.coordinates.at(-1)!];
+        for (const end of ends) {
+            assert.ok(
+                meters(end, [cikarang.stop_lon, cikarang.stop_lat]) < 1,
+                "Cikarang overview line must end on its station"
+            );
+        }
+    }
 });
 
 test("TP directionality and shared interchange remain intact", () => {
     assert.deepEqual(tp.variants[0].stopIds, ["TP01", "TP02", "TP03", "TP05"]);
     assert.deepEqual(tp.variants[1].stopIds, ["TP05", "TP04", "TP03", "TP02", "TP01"]);
-    assert.equal(stations.length, 30);
+    assert.equal(stations.length, 64);
     assert.equal(stations.filter((s) => s.routes.includes("C")).length, 26);
     const shared = stations.filter((s) => s.name === "Kampung Bandan");
     assert.equal(shared.length, 1);
@@ -71,4 +90,52 @@ test("TP directionality and shared interchange remain intact", () => {
         ["TP02", tpStop.stop_lat, tpStop.stop_lon],
         ["C07", cStop.stop_lat, cStop.stop_lon],
     ]);
+});
+
+test("Tangerang has eleven ordered stations each way and a shared Duri interchange", () => {
+    assert.equal(t.route_id, "T");
+    assert.equal(t.route_color, "C25F28");
+    assert.deepEqual(t.stops.map((s) => s.stop_id),
+        Array.from({ length: 11 }, (_, i) => `T${String(i + 1).padStart(2, "0")}`));
+    assert.deepEqual(t.variants.map((v) => v.stopIds), [
+        t.stops.map((s) => s.stop_id),
+        t.stops.map((s) => s.stop_id).reverse(),
+    ]);
+    for (const v of t.variants) {
+        assert.equal(v.headwaySecs, null);
+        assert.deepEqual(v.windows, []);
+        assert.ok(t.geometryByShape[v.shape_id]?.length > 100);
+    }
+    const duri = stations.filter((s) => s.name === "Duri");
+    assert.equal(duri.length, 1);
+    assert.deepEqual(duri[0].routes, ["C", "T"]);
+    assert.deepEqual(duri[0].anchors?.map((anchor) => anchor.routeId), ["C", "T"]);
+    assert.deepEqual(duri[0].anchors?.map((anchor) => anchor.stopId), ["C09", "T01"]);
+    assert.equal(stations.filter((s) => s.routes.includes("T")).length, 11);
+    assert.equal(overview.features.filter((f) => f.properties.color === "#C25F28").length, 1);
+});
+
+test("Bogor and Nambo branch reach their southern terminals", () => {
+    assert.equal(b.route_color, "EC2329");
+    assert.equal(b.stops.length, 26);
+    assert.deepEqual(b.variants.map((v) => v.stopCount), [24, 24, 23, 23]);
+    assert.deepEqual(b.variants.map((v) => v.kind), ["utama", "utama", "alihan", "alihan"]);
+    assert.deepEqual(b.variants.map((v) => [v.stopIds[0], v.stopIds.at(-1)]), [
+        ["B01", "B26"], ["B26", "B01"], ["B01", "b04"], ["b04", "B01"],
+    ]);
+    const bogor = b.stops.find((stop) => stop.stop_name === "Bogor")!;
+    assert.ok(bogor.stop_lat < -6.58, "Bogor must be south of the initial Jakarta view");
+    const nambo = b.stops.find((stop) => stop.stop_name === "Nambo")!;
+    const namboShape = b.geometryByShape[b.variants[2].shape_id];
+    assert.ok(nambo.stop_lon > 106.9, "Nambo must remain on the eastern branch");
+    assert.ok(
+        Math.hypot((namboshapeEnd(namboShape)[0] - nambo.stop_lon) * 110_700,
+            (namboshapeEnd(namboShape)[1] - nambo.stop_lat) * 110_540) < 1,
+        "Nambo marker must sit at the branch endpoint"
+    );
+    assert.equal(overview.features.filter((f) => f.properties.color === "#EC2329").length, 2);
+    const bounds = overview.features.flatMap((f) => f.geometry.coordinates);
+    assert.ok(Math.min(...bounds.map((point) => point[1])) < bogor.stop_lat + 0.001);
+    assert.deepEqual(stations.find((s) => s.name === "Jakarta Kota")?.routes, ["B", "TP"]);
+    assert.deepEqual(stations.find((s) => s.name === "Manggarai")?.routes, ["B", "C"]);
 });
