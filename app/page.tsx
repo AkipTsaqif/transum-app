@@ -42,6 +42,11 @@ import {
   type ModeRoute,
   type View,
 } from "@/utils/all-modes";
+import {
+  walkingConnections,
+  type NearbyConnection,
+  type NearbyStation,
+} from "@/utils/nearby";
 import { airportDisplayFeatures } from "@/utils/krl-display";
 
 import { ArrowLeft, ChevronRight, MapPin, Route, X } from "lucide-react";
@@ -78,7 +83,9 @@ const modeLabel = (m: View) =>
 
 export default function Index() {
   // What the picker shows: one dataset, or "all" of them together.
-  const [view, setView] = useState<View>("gtfs");
+  // Semua Moda is the landing view: one map with every network on it, and
+  // the picker can narrow to a single system from there.
+  const [view, setView] = useState<View>("all");
   const isAll = view === "all";
   // A request number, not a boolean: each deliberate mode switch asks the
   // map to fit the new network exactly once, after its overview has loaded.
@@ -155,6 +162,9 @@ export default function Index() {
   const [stationLoading, setStationLoading] = useState(false);
   const [stationError, setStationError] = useState<string | null>(null);
   const [stationRoutes, setStationRoutes] = useState<RouteDetail[]>([]);
+  // Cross-system transfers for the open station: stops of another service
+  // within a short walk. Empty until the station resolves.
+  const [connections, setConnections] = useState<NearbyConnection[]>([]);
   // True once "tampilkan rute" has been pressed: the sidebar panel and the
   // drawn routes both follow from this, the popup alone does not.
   const [stationExpanded, setStationExpanded] = useState(false);
@@ -232,6 +242,7 @@ export default function Index() {
       setFocusStop(null);
       setStation(null);
       setStationMode(null);
+      setConnections([]);
       setStationAnchor(null);
       setStationRoutes([]);
       setStationError(null);
@@ -474,6 +485,33 @@ export default function Index() {
 
         setStation(detail);
         setStationMode(owner);
+        // Cross-system transfers: separate request, optional. The station
+        // card must open even if this fails.
+        void fetch(`/api/nearby?lat=${detail.lat}&lon=${detail.lon}`, {
+          ...NO_CACHE_IN_DEV,
+          signal: ctrl.signal,
+        })
+          .then(async (r) =>
+            r.ok ? ((await r.json()) as NearbyStation[]) : [],
+          )
+          .then((near) => {
+            if (ctrl.signal.aborted) return;
+            setConnections(
+              walkingConnections(
+                {
+                  mode: owner,
+                  name: detail.name,
+                  lat: detail.lat,
+                  lon: detail.lon,
+                  routes: detail.routes,
+                },
+                near,
+              ),
+            );
+          })
+          .catch(() => {
+            // Aborted or offline: the station card simply has no transfers.
+          });
         if (owner === "krl" && detail.anchors?.length) {
           const closest = [...detail.anchors].sort(
             (a, b) =>
@@ -620,10 +658,22 @@ export default function Index() {
     [handleStopClick],
   );
 
+  /**
+   * A connection was picked: the station card moves to that stop instead,
+   * resolved against its own dataset. Same path as clicking it on the map.
+   */
+  const pickConnection = useCallback(
+    (c: NearbyConnection) => {
+      handleStationClick(c.name, c.lat, c.lon, c.mode);
+    },
+    [handleStationClick],
+  );
+
   const clearStation = useCallback(() => {
     stationAbortRef.current?.abort();
     setStation(null);
     setStationMode(null);
+    setConnections([]);
     setStationAnchor(null);
     setStationRoutes([]);
     setStationError(null);
@@ -1109,6 +1159,8 @@ export default function Index() {
                 station={station}
                 loading={stationLoading}
                 error={stationError}
+                connections={connections}
+                onPickConnection={pickConnection}
                 onBack={clearStation}
                 onPickRoute={(id) => {
                   const owner = stationMode ?? lineMode;
@@ -1291,6 +1343,7 @@ export default function Index() {
         <MainMapComponent
           layers={layers}
           previewLayer={previewLayer}
+          connections={connections}
           leftInset={
             // The larger of the two: the measurement lags a
             // route switch (it still holds the previous card's
@@ -1332,8 +1385,10 @@ export default function Index() {
                 loading={stationLoading}
                 error={stationError}
                 expanded={stationExpanded}
+                connections={connections}
                 onShowRoutes={showStationRoutes}
                 onClose={clearStation}
+                onPickConnection={pickConnection}
               />
             ) : null
           }
@@ -1762,15 +1817,19 @@ function StopPopupCard({
   loading,
   error,
   expanded,
+  connections,
   onShowRoutes,
   onClose,
+  onPickConnection,
 }: {
   station: StationDetail;
   loading: boolean;
   error: string | null;
   expanded: boolean;
+  connections: NearbyConnection[];
   onShowRoutes: () => void;
   onClose: () => void;
+  onPickConnection: (c: NearbyConnection) => void;
 }) {
   return (
     <div className="w-56 overflow-hidden rounded-lg bg-jakarta text-white shadow-xl ring-1 ring-white/10">
@@ -1820,6 +1879,12 @@ function StopPopupCard({
         </p>
       )}
 
+      <ConnectionList
+        connections={connections}
+        onPick={onPickConnection}
+        compact
+      />
+
       <button
         type="button"
         onClick={onShowRoutes}
@@ -1841,14 +1906,18 @@ function StopPanel({
   station,
   loading,
   error,
+  connections,
   onBack,
   onPickRoute,
+  onPickConnection,
 }: {
   station: StationDetail;
   loading: boolean;
   error: string | null;
+  connections: NearbyConnection[];
   onBack: () => void;
   onPickRoute: (routeId: string) => void;
+  onPickConnection: (c: NearbyConnection) => void;
 }) {
   return (
     <div className="-ml-4 -mr-4">
@@ -1911,6 +1980,77 @@ function StopPanel({
                 {r.position === r.totalStops && " \u00b7 akhir"}
               </div>
             )}
+          </div>
+        </button>
+      ))}
+
+      <ConnectionList connections={connections} onPick={onPickConnection} />
+    </div>
+  );
+}
+
+/**
+ * "Koneksi sekitar": stops of another service within a short walk, the
+ * transfers this station opens up. Each row names the system and the routes
+ * it uniquely contributes, so the list is "where can I change?" rather than
+ * "what else is nearby?" (see utils/nearby.ts for the rule).
+ *
+ * `compact` fits the map popup: fewer rows, no divider headers.
+ */
+function ConnectionList({
+  connections,
+  onPick,
+  compact = false,
+}: {
+  connections: NearbyConnection[];
+  onPick: (c: NearbyConnection) => void;
+  compact?: boolean;
+}) {
+  if (!connections.length) return null;
+  const shown = compact ? connections.slice(0, 5) : connections;
+  return (
+    <div className="border-t border-white/10">
+      <div className="px-3 pt-2 pb-1 text-[10px] font-bold tracking-wide text-white/40 uppercase">
+        Koneksi sekitar
+        {compact && connections.length > shown.length && (
+          <span className="ml-1 text-white/30 normal-case">
+            ({connections.length - shown.length} lainnya di panel)
+          </span>
+        )}
+      </div>
+      {shown.map((c) => (
+        <button
+          key={`${c.mode}:${c.name}@${c.lat},${c.lon}`}
+          type="button"
+          onClick={() => onPick(c)}
+          className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-white/10"
+        >
+          <div className="flex shrink-0 items-center gap-1">
+            {c.routes.slice(0, compact ? 2 : 3).map((r) => (
+              <span
+                key={r.route_id}
+                title={`${r.route_short_name} · ${r.route_long_name}`}
+                className="rounded px-1 py-0.5 text-[9px] leading-none font-bold font-pt-sans-narrow"
+                style={{
+                  backgroundColor: `#${r.route_color}`,
+                  color:
+                    calculateLuminance(r.route_color) > 0.5 ? "black" : "white",
+                }}
+              >
+                {r.route_short_name}
+              </span>
+            ))}
+            {c.routes.length > (compact ? 2 : 3) && (
+              <span className="text-[9px] text-white/40">
+                +{c.routes.length - (compact ? 2 : 3)}
+              </span>
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-xs font-pt-sans">{c.name}</div>
+            <div className="truncate text-[10px] text-white/50">
+              {modeLabel(c.mode)} · {Math.round(c.distance)} m
+            </div>
           </div>
         </button>
       ))}

@@ -28,6 +28,11 @@ import type { RouteStop, ShapeCollection } from "@/utils/types/gtfs";
 import type { TransitMode } from "@/lib/gtfs";
 import { haversine, removeOppStopPrefix } from "@/utils/helper-fn";
 import {
+  connectionsAnchor,
+  walkRadiusRing,
+  type NearbyConnection,
+} from "@/utils/nearby";
+import {
   interchangeFeatures,
   interchangeSeparationPx,
   interchangesFromStops,
@@ -311,6 +316,11 @@ interface MainMapComponentProps {
   ) => void;
   /** Fired the first time the user crosses into all-stops territory. */
   onNeedAllStops?: () => void;
+  /**
+   * Cross-system transfers for the open station, drawn on the map alongside
+   * the faint walk ring: the card lists them, the map shows where they are.
+   */
+  connections?: NearbyConnection[];
   /** Pin for the currently selected station, if any. */
   activeStop?: { lat: number; lon: number; name: string } | null;
   onStopClick?: (stop: RouteStop) => void;
@@ -670,6 +680,7 @@ const MainMapComponent = ({
   allStops,
   showAllStops = true,
   activeStop,
+  connections = [],
   onStopClick,
   onBackgroundClick,
   onStationClick,
@@ -794,10 +805,16 @@ const MainMapComponent = ({
 
     // Bottom to top. Route lines first, then stop graphics above them.
     const desired = [
+      // The walk ring is faint context: it goes under the lines so a route
+      // crossing it stays crisp, and it never covers a stop.
+      ...order.filter((id) => id.startsWith("walk-ring-")),
       ...order.filter((id) => id === "overview-line"),
       ...order.filter((id) => id.startsWith("shape-line")),
       ...order.filter((id) => id === "airport-station-join-line"),
       ...order.filter((id) => id.startsWith("all-stops-")),
+      // Transfer dots are stops and sit above every line, below the
+      // interchange connectors and the open station's pin.
+      ...order.filter((id) => id === "connection-stop"),
       ...order.filter((id) => id.startsWith("interchange-")),
       ...order.filter((id) => id === "route-stop-pin"),
     ];
@@ -832,7 +849,6 @@ const MainMapComponent = ({
       if (map.hasImage?.(id)) continue;
       map.addImage(id, makeDotImage(spec), { pixelRatio: 2 });
     }
-
   }, []);
 
   /** Both style-level fixups, for `onLoad` and `onStyleData`. */
@@ -840,6 +856,63 @@ const MainMapComponent = ({
     addPinImages();
     enforceLayerOrder();
   }, [addPinImages, enforceLayerOrder]);
+
+  // Transfer dots and the walk ring. Only while a station card is open, and
+  // the ring only when there is something to connect to: an empty ring just
+  // says "searched here and found nothing".
+  const connectionGeo = useMemo<FeatureCollection>(() => {
+    if (!activeStop || !connections.length) {
+      return { type: "FeatureCollection", features: [] };
+    }
+    return {
+      type: "FeatureCollection",
+      features: connections.map((c) => ({
+        type: "Feature",
+        properties: {
+          name: c.name,
+          mode: c.mode,
+          distance: c.distance,
+          // The click path resolves by name + coordinates + mode.
+          lat: c.lat,
+          lon: c.lon,
+        },
+        geometry: { type: "Point", coordinates: [c.lon, c.lat] },
+      })),
+    };
+  }, [activeStop, connections]);
+
+  const walkRingGeo = useMemo<FeatureCollection>(() => {
+    if (!activeStop || !connections.length) {
+      return { type: "FeatureCollection", features: [] };
+    }
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "Polygon",
+            coordinates: [walkRadiusRing(activeStop.lat, activeStop.lon)],
+          },
+        },
+      ],
+    };
+  }, [activeStop, connections]);
+
+  /**
+   * Where the station card sits. MapLibre keeps a popup inside the viewport
+   * but knows nothing about other symbols, so the card would cover the very
+   * dots it lists. Anchoring it to the corner OPPOSITE the connection cluster
+   * keeps the dots clear, and the fit below frames them in the free half.
+   */
+  const cardAnchor = useMemo(
+    () =>
+      activeStop && connections.length
+        ? connectionsAnchor(activeStop, connections)
+        : undefined,
+    [activeStop, connections],
+  );
 
   // Clustering is O(n^2); keep it out of the render path on every pan.
   const routeClusters = useMemo(
@@ -1200,6 +1273,10 @@ const MainMapComponent = ({
     const map = mapRef.current;
     if (!map || !activeStop) return;
 
+    // Centred on the station, always: the walk ring is drawn around it, so
+    // framing the whole cluster instead left both visibly off-centre. The
+    // card still picks the corner covering the fewest transfer dots (see
+    // `cardAnchor`), which keeps most of them clear without moving the map.
     map.easeTo({
       center: [activeStop.lon, activeStop.lat],
       zoom: Math.max(map.getZoom(), stopFocusZoom),
@@ -1255,6 +1332,7 @@ const MainMapComponent = ({
       // Clicking a GPU circle layer: hit-test by layer id, since these
       // are painted pixels rather than DOM nodes with their own handlers.
       interactiveLayerIds={[
+        ...(connectionGeo.features.length ? ["connection-stop"] : []),
         // Interchanges are always drawn as the real connector pill; the
         // two platforms are held at least
         // `INTERCHANGE_MIN_SEPARATION_PX` apart at every zoom, so they
@@ -1319,6 +1397,20 @@ const MainMapComponent = ({
           return;
         }
 
+        // A transfer dot belongs to another dataset entirely; its `mode` tag
+        // is what resolves it (the all view has no single active dataset).
+        if (f.layer?.id === "connection-stop") {
+          const p = f.properties ?? {};
+          setStopFocusRequest((n) => n + 1);
+          onStationClick?.(
+            String(p.name ?? ""),
+            Number(p.lat ?? 0),
+            Number(p.lon ?? 0),
+            p.mode as TransitMode,
+          );
+          return;
+        }
+
         if (f.layer?.id === "all-stops-circle") {
           const [lon, lat] = (f.geometry as Point).coordinates;
           setStopFocusRequest((n) => n + 1);
@@ -1345,6 +1437,7 @@ const MainMapComponent = ({
         const id = f?.layer?.id;
         const name =
           id === "all-stops-circle" ||
+          id === "connection-stop" ||
           id === "route-stop-pin" ||
           id?.startsWith("interchange-")
             ? String(f?.properties?.name ?? "")
@@ -1738,6 +1831,70 @@ const MainMapComponent = ({
         </>
       )}
 
+      {walkRingGeo.features.length > 0 && (
+        <Source id="walk-ring" type="geojson" data={walkRingGeo}>
+          {/* Faint disc and outline: the search radius the connection list
+              was built with. No labels, no interaction -- pure context. */}
+          <Layer
+            id="walk-ring-fill"
+            type="fill"
+            paint={{ "fill-color": "#0C1B2A", "fill-opacity": 0.06 }}
+          />
+          <Layer
+            id="walk-ring-line"
+            type="line"
+            layout={{ "line-join": "round" }}
+            paint={{
+              "line-color": "#0C1B2A",
+              "line-opacity": 0.25,
+              "line-width": 1,
+              "line-dasharray": [3, 2],
+            }}
+          />
+        </Source>
+      )}
+
+      {connectionGeo.features.length > 0 && (
+        <Source id="connection-stops" type="geojson" data={connectionGeo}>
+          {/*
+            Transfers of OTHER services: the normal station dot so the symbol
+            family is unchanged, with its name. Clicking one opens that stop
+            exactly like the card row does -- same `onStationClick` path, so
+            the mode tag resolves it against its own dataset.
+          */}
+          <Layer
+            id="connection-stop"
+            type="symbol"
+            layout={{
+              "icon-image": "all-stop-dot",
+              "icon-allow-overlap": true,
+              "icon-size": STATION_ICON_SIZE,
+              "text-field": ["get", "name"],
+              "text-font": LABEL_FONT,
+              "text-size": 11,
+              "text-variable-anchor": [
+                "right",
+                "left",
+                "top",
+                "bottom",
+                "top-right",
+                "top-left",
+                "bottom-right",
+                "bottom-left",
+              ],
+              "text-radial-offset": 0.9,
+              "text-allow-overlap": false,
+              "text-optional": true,
+            }}
+            paint={{
+              "text-color": "#0C1B2A",
+              "text-halo-color": "#FFFFFF",
+              "text-halo-width": 1.5,
+            }}
+          />
+        </Source>
+      )}
+
       {/*
               `>=`, not `>`: `zoomLevel` is floored, so a camera settled at
               z10.4 reports 10. A strict `>` hid every route pin the moment a
@@ -1791,6 +1948,7 @@ const MainMapComponent = ({
             */}
       {activeStop && stopPopup && (
         <Popup
+          anchor={cardAnchor}
           longitude={
             activeStop.name === "Bandara Soekarno-Hatta" && airportTerminal
               ? airportTerminal[0]

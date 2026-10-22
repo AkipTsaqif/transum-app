@@ -1,13 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
-    RouteDetail,
-    RouteSummary,
-    ShapeCollection,
-    StationDetail,
-    StationIndexEntry,
-    StationRoute,
-    StationSearchHit,
+  RouteDetail,
+  RouteSummary,
+  ShapeCollection,
+  StationDetail,
+  StationIndexEntry,
+  StationRoute,
+  StationSearchHit,
 } from "@/utils/types/gtfs";
 
 /**
@@ -23,11 +23,17 @@ import type {
 export type TransitMode = "gtfs" | "krl" | "mrt" | "lrt" | "lrtj";
 
 /** Every mode, for `generateStaticParams`. */
-export const TRANSIT_MODES: TransitMode[] = ["gtfs", "krl", "mrt", "lrt", "lrtj"];
+export const TRANSIT_MODES: TransitMode[] = [
+  "gtfs",
+  "krl",
+  "mrt",
+  "lrt",
+  "lrtj",
+];
 
 /** Anything unrecognised falls back to the default rather than erroring. */
 export const parseMode = (v: string | null | undefined): TransitMode =>
-    v === "krl" || v === "mrt" || v === "lrt" || v === "lrtj" ? v : "gtfs";
+  v === "krl" || v === "mrt" || v === "lrt" || v === "lrtj" ? v : "gtfs";
 
 const dataDir = (mode: TransitMode) => path.join(process.cwd(), "data", mode);
 
@@ -48,15 +54,18 @@ const memo = <T>() => new Map<TransitMode, T>();
 const indexCache = memo<RouteSummary[]>();
 
 export async function getRouteIndex(
-    mode: TransitMode = "gtfs"
+  mode: TransitMode = "gtfs",
 ): Promise<RouteSummary[]> {
-    const hit = indexCache.get(mode);
-    if (hit) return hit;
+  const hit = indexCache.get(mode);
+  if (hit) return hit;
 
-    const raw = await fs.readFile(path.join(dataDir(mode), "routes.json"), "utf-8");
-    const parsed = JSON.parse(raw) as RouteSummary[];
-    indexCache.set(mode, parsed);
-    return parsed;
+  const raw = await fs.readFile(
+    path.join(dataDir(mode), "routes.json"),
+    "utf-8",
+  );
+  const parsed = JSON.parse(raw) as RouteSummary[];
+  indexCache.set(mode, parsed);
+  return parsed;
 }
 
 /**
@@ -67,70 +76,71 @@ export async function getRouteIndex(
  * and also prevents `..` traversal from reaching the filesystem.
  */
 export async function getRouteDetail(
-    routeId: string,
-    mode: TransitMode = "gtfs"
+  routeId: string,
+  mode: TransitMode = "gtfs",
 ): Promise<RouteDetail | null> {
-    const dir = path.join(dataDir(mode), "routes");
-    const file = path.join(dir, `${encodeURIComponent(routeId)}.json`);
+  const dir = path.join(dataDir(mode), "routes");
+  const file = path.join(dir, `${encodeURIComponent(routeId)}.json`);
 
-    // Defence in depth: the encoded name can never escape, but assert it anyway.
-    if (!file.startsWith(dir)) return null;
+  // Defence in depth: the encoded name can never escape, but assert it anyway.
+  if (!file.startsWith(dir)) return null;
 
-    try {
-        return JSON.parse(await fs.readFile(file, "utf-8")) as RouteDetail;
-    } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw err;
-    }
+  try {
+    return JSON.parse(await fs.readFile(file, "utf-8")) as RouteDetail;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
 }
 
 const stationCache = memo<Map<string, StationIndexEntry>>();
 
 async function getStationIndex(
-    mode: TransitMode
+  mode: TransitMode,
 ): Promise<Map<string, StationIndexEntry>> {
-    const hit = stationCache.get(mode);
-    if (hit) return hit;
+  const hit = stationCache.get(mode);
+  if (hit) return hit;
 
-    const raw = await fs.readFile(path.join(dataDir(mode), "stops.json"), "utf-8");
-    const list = JSON.parse(raw) as StationIndexEntry[];
-    const map = new Map(list.map((s) => [s.id, s]));
-    stationCache.set(mode, map);
-    return map;
+  const raw = await fs.readFile(
+    path.join(dataDir(mode), "stops.json"),
+    "utf-8",
+  );
+  const list = JSON.parse(raw) as StationIndexEntry[];
+  const map = new Map(list.map((s) => [s.id, s]));
+  stationCache.set(mode, map);
+  return map;
 }
 
 async function expand(
-    station: StationIndexEntry | undefined,
-    mode: TransitMode
+  station: StationIndexEntry | undefined,
+  mode: TransitMode,
 ): Promise<StationDetail | null> {
-    if (!station) return null;
+  if (!station) return null;
 
-    const routes = await getRouteIndex(mode);
-    const byId = new Map(routes.map((r) => [r.route_id, r]));
+  const routes = await getRouteIndex(mode);
+  const byId = new Map(routes.map((r) => [r.route_id, r]));
 
-    return {
-        id: station.id,
-        name: station.name,
-        lat: station.lat,
-        lon: station.lon,
-        platforms: station.platforms,
-        ...(station.anchors ? { anchors: station.anchors } : {}),
-        routes: station.routes
-            .map((id): StationRoute | undefined => {
-                const r = byId.get(id);
-                if (!r) return undefined;
-                const pos = station.positions?.[id];
-                return pos
-                    ? { ...r, position: pos[0], totalStops: pos[1] }
-                    : r;
-            })
-            .filter((r): r is StationRoute => Boolean(r))
-            .sort((a, b) =>
-                a.route_short_name.localeCompare(b.route_short_name, "en", {
-                    numeric: true,
-                })
-            ),
-    };
+  return {
+    id: station.id,
+    name: station.name,
+    lat: station.lat,
+    lon: station.lon,
+    platforms: station.platforms,
+    ...(station.anchors ? { anchors: station.anchors } : {}),
+    routes: station.routes
+      .map((id): StationRoute | undefined => {
+        const r = byId.get(id);
+        if (!r) return undefined;
+        const pos = station.positions?.[id];
+        return pos ? { ...r, position: pos[0], totalStops: pos[1] } : r;
+      })
+      .filter((r): r is StationRoute => Boolean(r))
+      .sort((a, b) =>
+        a.route_short_name.localeCompare(b.route_short_name, "en", {
+          numeric: true,
+        }),
+      ),
+  };
 }
 
 /**
@@ -140,24 +150,23 @@ async function expand(
  * clients only ever receive the single ~1-3 KB station they asked for.
  */
 export async function getStationDetail(
-    stationId: string,
-    mode: TransitMode = "gtfs"
+  stationId: string,
+  mode: TransitMode = "gtfs",
 ): Promise<StationDetail | null> {
-    const stations = await getStationIndex(mode);
-    return expand(stations.get(stationId), mode);
+  const stations = await getStationIndex(mode);
+  return expand(stations.get(stationId), mode);
 }
 
 /** Metres between two lat/lon pairs. */
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
-    const R = 6371e3;
-    const p1 = (lat1 * Math.PI) / 180;
-    const p2 = (lat2 * Math.PI) / 180;
-    const dp = ((lat2 - lat1) * Math.PI) / 180;
-    const dl = ((lon2 - lon1) * Math.PI) / 180;
-    const a =
-        Math.sin(dp / 2) ** 2 +
-        Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const R = 6371e3;
+  const p1 = (lat1 * Math.PI) / 180;
+  const p2 = (lat2 * Math.PI) / 180;
+  const dp = ((lat2 - lat1) * Math.PI) / 180;
+  const dl = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 /**
@@ -166,35 +175,35 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
  * several parts of the city.
  */
 export async function resolveStation(
-    name: string,
-    lat: number,
-    lon: number,
-    mode: TransitMode = "gtfs"
+  name: string,
+  lat: number,
+  lon: number,
+  mode: TransitMode = "gtfs",
 ): Promise<StationDetail | null> {
-    const stations = await getStationIndex(mode);
+  const stations = await getStationIndex(mode);
 
-    let best: StationIndexEntry | undefined;
-    let bestDist = Infinity;
+  let best: StationIndexEntry | undefined;
+  let bestDist = Infinity;
 
-    for (const s of stations.values()) {
-        if (s.name !== name) continue;
-        const d = Math.min(
-            haversine(lat, lon, s.lat, s.lon),
-            ...(s.anchors ?? []).map((anchor) =>
-                haversine(lat, lon, anchor.lat, anchor.lon)
-            )
-        );
-        if (d < bestDist) {
-            bestDist = d;
-            best = s;
-        }
+  for (const s of stations.values()) {
+    if (s.name !== name) continue;
+    const d = Math.min(
+      haversine(lat, lon, s.lat, s.lon),
+      ...(s.anchors ?? []).map((anchor) =>
+        haversine(lat, lon, anchor.lat, anchor.lon),
+      ),
+    );
+    if (d < bestDist) {
+      bestDist = d;
+      best = s;
     }
+  }
 
-    // Generous ceiling: the cluster centroid can sit a little way from any one
-    // platform, but a match kilometres away means we picked the wrong station.
-    if (!best || bestDist > 500) return null;
+  // Generous ceiling: the cluster centroid can sit a little way from any one
+  // platform, but a match kilometres away means we picked the wrong station.
+  if (!best || bestDist > 500) return null;
 
-    return expand(best, mode);
+  return expand(best, mode);
 }
 
 const overviewCache = memo<ShapeCollection>();
@@ -205,18 +214,18 @@ const overviewCache = memo<ShapeCollection>();
  * the zooms this renders at; per-route geometry stays full fidelity.
  */
 export async function getOverview(
-    mode: TransitMode = "gtfs"
+  mode: TransitMode = "gtfs",
 ): Promise<ShapeCollection> {
-    const hit = overviewCache.get(mode);
-    if (hit) return hit;
+  const hit = overviewCache.get(mode);
+  if (hit) return hit;
 
-    const raw = await fs.readFile(
-        path.join(dataDir(mode), "overview.json"),
-        "utf-8"
-    );
-    const parsed = JSON.parse(raw) as ShapeCollection;
-    overviewCache.set(mode, parsed);
-    return parsed;
+  const raw = await fs.readFile(
+    path.join(dataDir(mode), "overview.json"),
+    "utf-8",
+  );
+  const parsed = JSON.parse(raw) as ShapeCollection;
+  overviewCache.set(mode, parsed);
+  return parsed;
 }
 
 /**
@@ -224,61 +233,117 @@ export async function getOverview(
  * and busier interchanges outrank single-route stops.
  */
 export async function searchStations(
-    query: string,
-    limit = 20,
-    mode: TransitMode = "gtfs"
+  query: string,
+  limit = 20,
+  mode: TransitMode = "gtfs",
 ): Promise<StationSearchHit[]> {
-    const stations = await getStationIndex(mode);
-    const q = query.toLowerCase();
+  const stations = await getStationIndex(mode);
+  const q = query.toLowerCase();
 
-    const hits: Array<StationSearchHit & { rank: number }> = [];
+  const hits: Array<StationSearchHit & { rank: number }> = [];
 
-    for (const s of stations.values()) {
-        const idx = s.name.toLowerCase().indexOf(q);
-        if (idx === -1) continue;
+  for (const s of stations.values()) {
+    const idx = s.name.toLowerCase().indexOf(q);
+    if (idx === -1) continue;
 
-        hits.push({
-            name: s.name,
-            lat: s.lat,
-            lon: s.lon,
-            routeCount: s.routes.length,
-            // Earlier match wins; ties broken by how many routes call there.
-            rank: idx * 1000 - s.routes.length,
-        });
-    }
-
-    hits.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
-
-    return hits.slice(0, limit).map(({ rank, ...rest }) => {
-        void rank;
-        return rest;
+    hits.push({
+      name: s.name,
+      lat: s.lat,
+      lon: s.lon,
+      routeCount: s.routes.length,
+      // Earlier match wins; ties broken by how many routes call there.
+      rank: idx * 1000 - s.routes.length,
     });
+  }
+
+  hits.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+
+  return hits.slice(0, limit).map(({ rank, ...rest }) => {
+    void rank;
+    return rest;
+  });
+}
+
+/**
+ * Stations of EVERY dataset within a straight-line radius of a point, each
+ * tagged with its mode and its route summaries.
+ *
+ * Walking transfers are inherently cross-system -- the whole point is to see
+ * the Transjakarta stop next to the KRL station -- so this deliberately reads
+ * all five datasets rather than one mode. ~6,600 stations take a fraction of a
+ * millisecond to scan; the per-mode indexes are already memoised.
+ */
+export async function getNearbyStations(
+  lat: number,
+  lon: number,
+  radiusM: number,
+): Promise<
+  {
+    mode: TransitMode;
+    name: string;
+    lat: number;
+    lon: number;
+    distance: number;
+    routes: RouteSummary[];
+  }[]
+> {
+  const out: {
+    mode: TransitMode;
+    name: string;
+    lat: number;
+    lon: number;
+    distance: number;
+    routes: RouteSummary[];
+  }[] = [];
+
+  for (const mode of TRANSIT_MODES) {
+    const [stations, routes] = await Promise.all([
+      getStationIndex(mode),
+      getRouteIndex(mode),
+    ]);
+    const byId = new Map(routes.map((r) => [r.route_id, r]));
+    for (const s of stations.values()) {
+      const distance = haversine(lat, lon, s.lat, s.lon);
+      if (distance > radiusM) continue;
+      out.push({
+        mode,
+        name: s.name,
+        lat: s.lat,
+        lon: s.lon,
+        distance,
+        routes: s.routes
+          .map((id) => byId.get(id))
+          .filter((r): r is RouteSummary => Boolean(r)),
+      });
+    }
+  }
+  return out.sort((a, b) => a.distance - b.distance);
 }
 
 const stopLayerCache = memo<unknown>();
 
 /** Every station as GeoJSON points, for the zoomed-in all-stops layer. */
 export async function getStopLayer(
-    mode: TransitMode = "gtfs"
+  mode: TransitMode = "gtfs",
 ): Promise<unknown> {
-    const hit = stopLayerCache.get(mode);
-    if (hit) return hit;
+  const hit = stopLayerCache.get(mode);
+  if (hit) return hit;
 
-    const raw = await fs.readFile(
-        path.join(dataDir(mode), "stops-geo.json"),
-        "utf-8"
-    );
-    const parsed: unknown = JSON.parse(raw);
-    stopLayerCache.set(mode, parsed);
-    return parsed;
+  const raw = await fs.readFile(
+    path.join(dataDir(mode), "stops-geo.json"),
+    "utf-8",
+  );
+  const parsed: unknown = JSON.parse(raw);
+  stopLayerCache.set(mode, parsed);
+  return parsed;
 }
 
 export async function getSyncMeta(mode: TransitMode = "gtfs") {
-    try {
-        return JSON.parse(
-            await fs.readFile(path.join(dataDir(mode), ".meta.json"), "utf-8")
-        );
-    } catch {
-        return null;
-    }
+  try {
+    return JSON.parse(
+      await fs.readFile(path.join(dataDir(mode), ".meta.json"), "utf-8"),
+    );
+  } catch {
+    return null;
+  }
 }
