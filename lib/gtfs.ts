@@ -17,15 +17,17 @@ import type {
  *   gtfs  data/gtfs/  Transjakarta, from the official GTFS feed (sync:gtfs)
  *   krl   data/krl/   KRL Commuter Line, from OpenStreetMap (sync:krl)
  *   mrt   data/mrt/   MRT Jakarta, from OpenStreetMap (sync:mrt)
+ *   lrt   data/lrt/   LRT Jakarta (Jakpro), from OpenStreetMap (sync:lrt)
+ *   lrtj  data/lrtj/  LRT Jabodebek (PT KAI), from OpenStreetMap (sync:lrt)
  */
-export type TransitMode = "gtfs" | "krl" | "mrt";
+export type TransitMode = "gtfs" | "krl" | "mrt" | "lrt" | "lrtj";
 
 /** Every mode, for `generateStaticParams`. */
-export const TRANSIT_MODES: TransitMode[] = ["gtfs", "krl", "mrt"];
+export const TRANSIT_MODES: TransitMode[] = ["gtfs", "krl", "mrt", "lrt", "lrtj"];
 
 /** Anything unrecognised falls back to the default rather than erroring. */
 export const parseMode = (v: string | null | undefined): TransitMode =>
-    v === "krl" || v === "mrt" ? v : "gtfs";
+    v === "krl" || v === "mrt" || v === "lrt" || v === "lrtj" ? v : "gtfs";
 
 const dataDir = (mode: TransitMode) => path.join(process.cwd(), "data", mode);
 
@@ -38,7 +40,9 @@ const memo = <T>() => new Map<TransitMode, T>();
 /**
  * Baked accessors. `data/gtfs/` is produced by `npm run sync:gtfs` from the
  * official Transjakarta feed; `data/krl/` by `npm run sync:krl`, and
- * `data/mrt/` by `npm run sync:mrt` (shared station centers for both tracks).
+ * `data/mrt/` by `npm run sync:mrt` (shared station centers for both tracks), and
+ * `data/lrt/` and `data/lrtj/` by `npm run sync:lrt` (Jakpro line J; KAI's
+ * Cibubur and Bekasi with their shared Dukuh Atas-Cawang trunk).
  */
 
 const indexCache = memo<RouteSummary[]>();

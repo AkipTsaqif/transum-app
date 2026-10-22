@@ -1,0 +1,11 @@
+{
+  "source": "OpenStreetMap relation full API",
+  "attribution": "© OpenStreetMap contributors",
+  "system": "LRT Jakarta",
+  "relations": [
+    10693119,
+    10693160
+  ],
+  "syncedAt": "2026-10-22T04:45:42.459Z",
+  "scope": "Operating LRT Jakarta lines: J Manggarai - Kelapa Gading."
+}

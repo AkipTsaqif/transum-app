@@ -1,32 +1,36 @@
-# MRT Jakarta impact and implementation plan
+# LRT Jakarta impact and implementation plan
 
 ## Target
-Add MRT as a separate transit dataset and enable the existing MRT mode choice.
+Add LRT as two transit modes, split by operator: LRT Jakarta (Jakarta government, via Jakpro) and LRT Jabodebek (PT KAI).
+
+## Scope (confirmed with owner)
+All three operating lines. The owner asked for the two systems to be split in the dropdown, since J belongs to the Jakarta government and CB/BK to PT KAI. Mode `lrt` (`data/lrt/`) holds J; mode `lrtj` (`data/lrtj/`) holds CB and BK.
+
+| id | line | stations | OSM relations (out / back) | colour |
+|----|------|----------|----------------------------|--------|
+| J  | LRT Jakarta Lin Selatan, Manggarai - Kelapa Gading | 11 | 10693119 / 10693160 | F16227 |
+| CB | Jabodebek Cibubur, Dukuh Atas - Harjamukti | 12 | 16036440 / 16036441 | 20409A |
+| BK | Jabodebek Bekasi, Dukuh Atas - Jatimulya | 14 | 16079479 / 16079478 | 0E6938 |
+
+LRT Jakarta Fase 1B (Velodrome - Manggarai) opened 16 Sep 2026, so the whole Jakpro line is operating. Cibubur and Bekasi share Dukuh Atas - Cawang (8 stations incl. Cawang), so 12 + 14 - 8 = 18 unique Jabodebek stations, matching KAI's published 18. Jakpro adds 11 stations.
 
 ## Dependents
-- `lib/gtfs.ts`: TransitMode, mode parser and per-mode file/cache accessors.
-- `app/api/[mode]/**`: static parameter enumeration uses TRANSIT_MODES; all routes must support MRT without falling back to GTFS.
-- `app/page.tsx`: mode picker, immediate small-network station load and mode-switch reset/framing.
-- `components/map/main-map.tsx`: mode union, OSM attribution, overview/marker/label visibility.
-- New `scripts/sync-mrt.ts`, `utils/mrt-data.ts`, `data/mrt/` and MRT tests.
-
-## Affected stories
-No release-plan or epic capsules currently exist in this repository.
-
-## Test coverage
-Existing 19 KRL/interchange/trunk tests are regression checks. Add tests for MRT's 13 ordered stations in both directions, geometry continuity and terminal trimming, missing/inactive data rejection, mode isolation, search and station resolution. Browser-check switching modes, route selection and station popup.
+- `lib/gtfs.ts`: TransitMode, TRANSIT_MODES, parseMode, per-mode accessors.
+- `app/api/[mode]/**`: static params come from TRANSIT_MODES.
+- `app/page.tsx`: mode picker, immediate station-layer load, `mode === "krl"` interchange/offset paths.
+- `components/map/main-map.tsx`: attribution, rail floors, `mode !== "gtfs"` overview style, KRL-only interchange logic.
+- New: `scripts/sync-lrt.ts`, `utils/lrt-data.ts`, `data/lrt/`, LRT tests.
 
 ## Risk: Medium
-Mode enumeration touches all seven API routes, but the shared file layout avoids API redesign. MRT must not trigger airport-specific display code or modify existing GTFS/KRL baked data.
+Shared station merging and a shared 8-station trunk are new relative to MRT (a single line). KRL interchange rendering is keyed on `mode === "krl"`, so LRT needs its own decision about how Cawang, Dukuh Atas and the Cibubur/Bekasi split render. Existing GTFS/KRL/MRT data must remain byte-identical.
 
-## Implementation sequence
-1. Test and bake operating OSM subway relations 9677669/9677670 only. Use M and station codes NS01–NS13; preserve current station names from OSM. No invented timetable.
-2. Enable mrt in the shared mode union, APIs and picker. Treat non-GTFS modes as small rail networks for initial station visibility, opaque overview and framing; keep KRL-specific interchange/offset checks unchanged.
-3. Run all tests, typecheck and production build; check APIs and Firefox interactions. Leave work uncommitted unless requested.
+## Findings from OSM inspection
+- All six relations chain into continuous tracks, every stop within 0 m of the chained line and in order.
+- The LRT Jakarta return relation starts with a 168 m spur way at Kelapa Gading that is not on the outbound relation; terminal trimming must cut it.
+- Station names carry sponsor naming rights (`Dukuh Atas Bank Syariah Indonesia`); match on stable base names, not full names.
+- `Setiabudi`, `Cawang`, `Dukuh Atas`, `Manggarai` are shared station names with MRT/KRL but are different physical stations; LRT data stays in its own mode.
 
 ## Sources
-- https://www.openstreetmap.org/relation/9677669
-- https://www.openstreetmap.org/relation/9677670
-- https://www.jakartamrt.co.id/
-- https://bisnis.jakartamrt.co.id/naming-right
-- https://landingpage-dev.jakartamrt.co.id/id/proyek/fase-2
+- https://www.openstreetmap.org/relation/10693119, 10693160, 16036440, 16036441, 16079478, 16079479
+- https://lrtjabodebek.kai.id/informasi-peta-rute
+- https://www.kompas.id/artikel/lrt-jakarta-resmi-beroperasi-hingga-manggarai-integrasi-antarmoda-disiapkan
