@@ -1,0 +1,13 @@
+{
+  "source": "OpenStreetMap relation full API",
+  "attribution": "© OpenStreetMap contributors",
+  "system": "LRT Jabodebek",
+  "relations": [
+    16036440,
+    16036441,
+    16079479,
+    16079478
+  ],
+  "syncedAt": "2026-10-22T04:45:42.461Z",
+  "scope": "Operating LRT Jabodebek lines: CB Dukuh Atas - Harjamukti, BK Dukuh Atas - Jatimulya."
+}
