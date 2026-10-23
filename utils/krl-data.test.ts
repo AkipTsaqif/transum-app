@@ -11,6 +11,7 @@ const tp = load<RouteDetail>("routes/TP.json");
 const t = load<RouteDetail>("routes/T.json");
 const a = load<RouteDetail>("routes/A.json");
 const b = load<RouteDetail>("routes/B.json");
+const r = load<RouteDetail>("routes/R.json");
 const namboshapeEnd = (shape: [number, number][]) => shape.at(-1)!;
 const stations = load<StationIndexEntry[]>("stops.json");
 const overview = load<{
@@ -42,7 +43,7 @@ test("C full rackets retain ordered repeated calls and one-way Pasar Senen", () 
 test("C overview includes both continuous racket shapes", () => {
     const meters = (a: [number, number], b: [number, number]) =>
         Math.hypot((a[0] - b[0]) * 110_700, (a[1] - b[1]) * 110_540);
-    assert.equal(overview.features.length, 8); // TP + both C rackets + T + two A segments + B main/branch
+    assert.equal(overview.features.length, 9); // + the Rangkasbitung line
     for (const v of c.variants) {
         const shape = c.geometryByShape[v.shape_id];
         assert.ok(shape.length > 1000);
@@ -77,7 +78,7 @@ test("C overview includes both continuous racket shapes", () => {
 test("TP directionality and shared interchange remain intact", () => {
     assert.deepEqual(tp.variants[0].stopIds, ["TP01", "TP02", "TP03", "TP05"]);
     assert.deepEqual(tp.variants[1].stopIds, ["TP05", "TP04", "TP03", "TP02", "TP01"]);
-    assert.equal(stations.length, 65);
+    assert.equal(stations.length, 84);
     assert.equal(stations.filter((s) => s.routes.includes("C")).length, 26);
     const shared = stations.filter((s) => s.name === "Kampung Bandan");
     assert.equal(shared.length, 1);
@@ -185,4 +186,28 @@ test("Bogor and Nambo branch reach their southern terminals", () => {
     assert.ok(Math.min(...bounds.map((point) => point[1])) < bogor.stop_lat + 0.001);
     assert.deepEqual(stations.find((s) => s.name === "Jakarta Kota")?.routes, ["B", "TP"]);
     assert.deepEqual(stations.find((s) => s.name === "Manggarai")?.routes, ["A", "B", "C"]);
+});
+
+test("Rangkasbitung reaches Rangkasbitung with Cikoya restored", () => {
+    assert.equal(r.route_color, "99CA3E");
+    assert.equal(r.stops.length, 20);
+    assert.deepEqual(r.variants.map((v) => v.stopIds.length), [20, 20]);
+    assert.deepEqual(
+        r.stops.map((s) => s.stop_id),
+        ["R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09", "R10",
+         "R11", "R12", "R14", "R15", "R16", "R18", "R19", "R20", "R21", "R22"],
+    );
+    assert.equal(
+        r.stops.find((s) => s.stop_id === "R19")?.stop_name,
+        "Cikoya",
+        "Cikoya is missing from OSM's stop members but operates",
+    );
+    assert.deepEqual(
+        r.variants.map((v) => [v.stopIds[0], v.stopIds.at(-1)]),
+        [["R01", "R22"], ["R22", "R01"]],
+    );
+    assert.ok(r.variants.every((v) => v.headwaySecs === null));
+    const tanahAbang = stations.find((s) => s.name === "Tanah Abang")!;
+    assert.deepEqual(tanahAbang.routes, ["C", "R"]);
+    assert.equal(overview.features.filter((f) => f.properties.color === "#99CA3E").length, 1);
 });
