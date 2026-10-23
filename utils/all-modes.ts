@@ -1,5 +1,6 @@
 import type { Feature, FeatureCollection, Geometry, LineString } from "geojson";
 import type { TransitMode } from "@/lib/gtfs";
+import { CITY_MODES, isBusMode } from "./cities";
 import type { RouteSummary } from "./types/gtfs";
 
 /**
@@ -13,11 +14,8 @@ import type { RouteSummary } from "./types/gtfs";
 
 /** Display order: rail first (few, important lines), bus last (240 routes). */
 export const ALL_MODE_ORDER: readonly TransitMode[] = [
-  "krl",
-  "mrt",
-  "lrt",
-  "lrtj",
-  "gtfs",
+  ...CITY_MODES.jakarta,
+  ...CITY_MODES.bandung,
 ];
 
 export interface ModeRoute {
@@ -64,8 +62,8 @@ export function mergeOverviews(
     overview: FeatureCollection<LineString> | null;
   }[],
 ): FeatureCollection<LineString> {
-  const bus = parts.filter((p) => p.mode === "gtfs");
-  const rail = parts.filter((p) => p.mode !== "gtfs");
+  const bus = parts.filter((p) => isBusMode(p.mode));
+  const rail = parts.filter((p) => !isBusMode(p.mode));
   const features: Feature<LineString>[] = [...bus, ...rail].flatMap(
     ({ mode, overview }) =>
       (overview?.features ?? []).map((feature) => ({
@@ -94,10 +92,10 @@ export function mergeStopLayers(
 }
 
 /** What the mode picker can show: one dataset, or every dataset together. */
-export type View = TransitMode | "all";
+export type View = TransitMode | "all" | "bandung-all";
 
 export function parseView(value: string): View | null {
-  if (value === "all") return "all";
+  if (value === "all" || value === "bandung-all") return value;
   return (ALL_MODE_ORDER as readonly string[]).includes(value)
     ? (value as TransitMode)
     : null;
@@ -112,7 +110,7 @@ export function dataModeFor(
   view: View,
   selectedKey: string | null,
 ): TransitMode | null {
-  if (view !== "all") return view;
+  if (view !== "all" && view !== "bandung-all") return view;
   return selectedKey ? (splitRouteKey(selectedKey)?.mode ?? null) : null;
 }
 
@@ -141,14 +139,14 @@ export function overviewLinePaint(
   allModes: boolean,
   mode: TransitMode,
 ): Record<string, unknown> {
-  const isBus = ["==", ["get", "mode"], "gtfs"];
+  const isBus = ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]];
   return {
     "line-color": ["get", "color"],
     // Only the airport and the LRT trunk carry a signed screen-space offset.
     "line-offset": ["coalesce", ["get", "lineOffset"], 0],
     "line-opacity": allModes
       ? ["case", isBus, BUS_OPACITY, 1]
-      : mode !== "gtfs"
+      : !isBusMode(mode)
         ? 1
         : BUS_OPACITY,
     "line-width": allModes
@@ -161,7 +159,7 @@ export function overviewLinePaint(
           13,
           ["case", isBus, 2.5, RAIL_WIDTH],
         ]
-      : mode !== "gtfs"
+      : !isBusMode(mode)
         ? RAIL_WIDTH
         : BUS_WIDTH,
   };
@@ -180,8 +178,16 @@ export function overviewLinePaint(
  */
 export const allStopsLabelFilter = (): unknown[] => [
   "any",
-  ["all", ["!=", ["get", "mode"], "gtfs"], [">=", ["zoom"], 12]],
-  ["all", ["==", ["get", "mode"], "gtfs"], [">=", ["zoom"], 14]],
+  [
+    "all",
+    ["!", ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]]],
+    [">=", ["zoom"], 12],
+  ],
+  [
+    "all",
+    ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]],
+    [">=", ["zoom"], 14],
+  ],
 ];
 
 export interface StationPoint {

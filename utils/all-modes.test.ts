@@ -61,7 +61,16 @@ test("route keys carry the mode so equal ids from two datasets never clash", () 
 });
 
 test("all-modes view lists rail before bus, each mode once", () => {
-  assert.deepEqual(ALL_MODE_ORDER, ["krl", "mrt", "lrt", "lrtj", "gtfs"]);
+  assert.deepEqual(ALL_MODE_ORDER, [
+    "krl",
+    "mrt",
+    "lrt",
+    "lrtj",
+    "gtfs",
+    "bdg-kci",
+    "bdg-kai",
+    "bdg-mjt",
+  ]);
 });
 
 test("routes are grouped per mode in display order, keeping each mode's own order", () => {
@@ -166,7 +175,18 @@ test("the effective data mode follows the owning route in the all view", () => {
 });
 
 test("view parsing accepts every dataset mode plus all, and nothing else", () => {
-  for (const v of ["gtfs", "krl", "mrt", "lrt", "lrtj", "all"]) {
+  for (const v of [
+    "gtfs",
+    "krl",
+    "mrt",
+    "lrt",
+    "lrtj",
+    "all",
+    "bdg-kci",
+    "bdg-kai",
+    "bdg-mjt",
+    "bandung-all",
+  ]) {
     assert.equal(parseView(v), v);
   }
   assert.equal(parseView("bus"), null);
@@ -177,7 +197,7 @@ test("overview paint is valid MapLibre style and keeps zoom at the top level", (
   // MapLibre rejects a zoom expression nested inside `case`; this catches that
   // class of bug without a browser.
   for (const allModes of [true, false]) {
-    for (const mode of ["gtfs", "krl"] as TransitMode[]) {
+    for (const mode of ["gtfs", "krl", "bdg-kci", "bdg-mjt"] as TransitMode[]) {
       const paint = overviewLinePaint(allModes, mode);
       const style = {
         version: 8 as const,
@@ -216,15 +236,38 @@ test("all-mode station names start at z12, bus stop names later", () => {
   const filter = allStopsLabelFilter();
   const style = {
     version: 8 as const,
-    sources: { stops: { type: "geojson" as const, data: { type: "FeatureCollection" as const, features: [] } } },
-    layers: [{ id: "all-stops-label", type: "symbol" as const, source: "stops", filter }],
+    sources: {
+      stops: {
+        type: "geojson" as const,
+        data: { type: "FeatureCollection" as const, features: [] },
+      },
+    },
+    layers: [
+      {
+        id: "all-stops-label",
+        type: "symbol" as const,
+        source: "stops",
+        filter,
+      },
+    ],
   };
-  assert.deepEqual(validateStyleMin(style as never).map((e) => e.message), []);
+  assert.deepEqual(
+    validateStyleMin(style as never).map((e) => e.message),
+    [],
+  );
   // Rail station names are readable from z12; the 6,437 bus names wait for z14.
   assert.deepEqual(filter, [
     "any",
-    ["all", ["!=", ["get", "mode"], "gtfs"], [">=", ["zoom"], 12]],
-    ["all", ["==", ["get", "mode"], "gtfs"], [">=", ["zoom"], 14]],
+    [
+      "all",
+      ["!", ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]]],
+      [">=", ["zoom"], 12],
+    ],
+    [
+      "all",
+      ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]],
+      [">=", ["zoom"], 14],
+    ],
   ]);
 });
 
@@ -232,12 +275,30 @@ test("a clicked station resolves to the dataset it lives in", () => {
   const at = (name: string, lat: number, lon: number) => ({
     type: "Feature" as const,
     properties: { name },
-    geometry: { type: "Point" as const, coordinates: [lon, lat] as [number, number] },
+    geometry: {
+      type: "Point" as const,
+      coordinates: [lon, lat] as [number, number],
+    },
   });
   const layers = [
-    { mode: "krl" as TransitMode, layer: { type: "FeatureCollection" as const, features: [at("Manggarai", -6.21017, 106.84993)] } },
+    {
+      mode: "krl" as TransitMode,
+      layer: {
+        type: "FeatureCollection" as const,
+        features: [at("Manggarai", -6.21017, 106.84993)],
+      },
+    },
     // Same name, different system ~1.2 km away (LRT Jakarta's own Manggarai).
-    { mode: "gtfs" as TransitMode, layer: { type: "FeatureCollection" as const, features: [at("Manggarai", -6.221, 106.85), at("Bundaran HI", -6.19, 106.82)] } },
+    {
+      mode: "gtfs" as TransitMode,
+      layer: {
+        type: "FeatureCollection" as const,
+        features: [
+          at("Manggarai", -6.221, 106.85),
+          at("Bundaran HI", -6.19, 106.82),
+        ],
+      },
+    },
   ];
   const near = { name: "Manggarai", lat: -6.21017, lon: 106.84993 };
   // Explicit mode from the map dot / search hit always wins.
@@ -246,9 +307,55 @@ test("a clicked station resolves to the dataset it lives in", () => {
   assert.equal(resolveStationMode(undefined, "lrtj", layers, near), "lrtj");
   // The all view has no fallback, so the nearest same-name station decides.
   assert.equal(resolveStationMode(undefined, null, layers, near), "krl");
-  assert.equal(resolveStationMode(undefined, null, layers, { name: "Bundaran HI", lat: -6.19, lon: 106.82 }), "gtfs");
+  assert.equal(
+    resolveStationMode(undefined, null, layers, {
+      name: "Bundaran HI",
+      lat: -6.19,
+      lon: 106.82,
+    }),
+    "gtfs",
+  );
   // Nothing matching nearby -> no owner, rather than guessing a dataset.
-  assert.equal(resolveStationMode(undefined, null, layers, { name: "Nowhere", lat: -6.21, lon: 106.85 }), null);
-  assert.equal(resolveStationMode(undefined, null, layers, { name: "Bundaran HI", lat: -6.30, lon: 106.82 }), null);
+  assert.equal(
+    resolveStationMode(undefined, null, layers, {
+      name: "Nowhere",
+      lat: -6.21,
+      lon: 106.85,
+    }),
+    null,
+  );
+  assert.equal(
+    resolveStationMode(undefined, null, layers, {
+      name: "Bundaran HI",
+      lat: -6.3,
+      lon: 106.82,
+    }),
+    null,
+  );
   assert.equal(resolveStationMode(undefined, null, [], near), null);
+});
+
+test("Bandung has its own all view, separate from Jakarta", () => {
+  assert.equal(parseView("bandung-all"), "bandung-all");
+  assert.deepEqual(splitRouteKey("bdg-mjt:FD1"), {
+    mode: "bdg-mjt",
+    routeId: "FD1",
+  });
+  assert.equal(dataModeFor("bandung-all", "bdg-kci:C"), "bdg-kci");
+  assert.equal(dataModeFor("bandung-all", null), null);
+  assert.equal(overviewLinePaint(false, "bdg-mjt")["line-opacity"], 0.35);
+  const merged = mergeOverviews([
+    {
+      mode: "bdg-kci",
+      overview: { type: "FeatureCollection", features: [line("#1C75BC")] },
+    },
+    {
+      mode: "bdg-mjt",
+      overview: { type: "FeatureCollection", features: [line("#00A64F")] },
+    },
+  ]);
+  assert.deepEqual(
+    merged.features.map((f) => f.properties?.mode),
+    ["bdg-mjt", "bdg-kci"],
+  );
 });

@@ -29,8 +29,8 @@ import type { FeatureCollection } from "geojson";
 import { DualLine, SingleLine } from "@/components/route/route-line-diagram";
 import { dualDiagramFor, singleDiagramFor } from "@/utils/line-diagram";
 import { railLineOffset } from "@/utils/line-offset";
+import { CITY_MODES, cityForMode, cityModes, isBusMode } from "@/utils/cities";
 import {
-  ALL_MODE_ORDER,
   dataModeFor,
   groupRoutesByMode,
   mergeOverviews,
@@ -65,6 +65,13 @@ const MODES: { value: TransitMode; label: string; ready: boolean }[] = [
   { value: "mrt", label: "MRT Jakarta", ready: true },
   { value: "lrt", label: "LRT Jakarta", ready: true },
   { value: "lrtj", label: "LRT Jabodebek", ready: true },
+  {
+    value: "bdg-kci",
+    label: "Commuter Line Bandung Raya & Garut",
+    ready: true,
+  },
+  { value: "bdg-kai", label: "KA Feeder Whoosh (PT KAI)", ready: true },
+  { value: "bdg-mjt", label: "Metro Jabar Trans", ready: true },
 ];
 /**
  * Baked data is served with an hour-long browser cache in production, which is
@@ -79,14 +86,18 @@ const NO_CACHE_IN_DEV: RequestInit =
   process.env.NODE_ENV === "production" ? {} : { cache: "no-store" };
 
 const modeLabel = (m: View) =>
-  m === "all" ? "Semua Moda" : (MODES.find((x) => x.value === m)?.label ?? m);
+  m === "all"
+    ? "Semua Moda · Jakarta"
+    : m === "bandung-all"
+      ? "Semua Moda · Bandung"
+      : (MODES.find((x) => x.value === m)?.label ?? m);
 
 export default function Index() {
   // What the picker shows: one dataset, or "all" of them together.
   // Semua Moda is the landing view: one map with every network on it, and
   // the picker can narrow to a single system from there.
   const [view, setView] = useState<View>("all");
-  const isAll = view === "all";
+  const isAll = view === "all" || view === "bandung-all";
   // A request number, not a boolean: each deliberate mode switch asks the
   // map to fit the new network exactly once, after its overview has loaded.
   const [overviewFitRequest, setOverviewFitRequest] = useState(0);
@@ -264,8 +275,13 @@ export default function Index() {
 
   /** The datasets the current view draws from: one, or all of them. */
   const viewModes: readonly TransitMode[] = useMemo(
-    () => (isAll ? ALL_MODE_ORDER : [view as TransitMode]),
-    [isAll, view],
+    () =>
+      view === "all"
+        ? CITY_MODES.jakarta
+        : view === "bandung-all"
+          ? CITY_MODES.bandung
+          : [view as TransitMode],
+    [view],
   );
 
   // Load the lightweight index once (~41 KB). Geometry is fetched per route.
@@ -487,10 +503,13 @@ export default function Index() {
         setStationMode(owner);
         // Cross-system transfers: separate request, optional. The station
         // card must open even if this fails.
-        void fetch(`/api/nearby?lat=${detail.lat}&lon=${detail.lon}`, {
-          ...NO_CACHE_IN_DEV,
-          signal: ctrl.signal,
-        })
+        void fetch(
+          `/api/nearby?lat=${detail.lat}&lon=${detail.lon}&city=${cityForMode(owner)}`,
+          {
+            ...NO_CACHE_IN_DEV,
+            signal: ctrl.signal,
+          },
+        )
           .then(async (r) =>
             r.ok ? ((await r.json()) as NearbyStation[]) : [],
           )
@@ -572,7 +591,11 @@ export default function Index() {
     }
   }, [station, mode]);
 
-  const showAllStops = !selectedRouteId && !station;
+  // A selected route owns its pin layer; the combined all-stops layer would
+  // paint every system's stations beneath the selected route's route-stop-pin.
+  const showAllStops = isAll
+    ? !selectedKey && !station
+    : !selectedRouteId && !station;
 
   /**
    * Fetched on demand: only a visitor who zooms in far enough pays for it.
@@ -629,7 +652,7 @@ export default function Index() {
   // Rail layers are small (~28 KB together), so fetch them immediately; the
   // bus layer stays lazy and is requested by the map at its own zoom floor.
   useEffect(() => {
-    const rail = viewModes.filter((m) => m !== "gtfs");
+    const rail = viewModes.filter((m) => !isBusMode(m));
     if (rail.length) loadStopLayers(rail);
   }, [viewModes, loadStopLayers]);
 
@@ -748,7 +771,8 @@ export default function Index() {
         const trunks = (r.variants ?? [])
           .filter(
             (v) =>
-              v.kind === "utama" || (r.route_id === "B" && v.kind === "alihan"),
+              v.kind === "utama" ||
+              (mode === "krl" && r.route_id === "B" && v.kind === "alihan"),
           )
           .map((v) => r.geometryByShape?.[v.shape_id])
           .filter((c): c is [number, number][] => Boolean(c?.length));
@@ -791,7 +815,7 @@ export default function Index() {
         variantTripId
           ? v.trip_id === variantTripId
           : v.kind === "utama" ||
-            (detail.route_id === "B" && v.kind === "alihan"),
+            (mode === "krl" && detail.route_id === "B" && v.kind === "alihan"),
       )
       .map((v) => lineFor(v.shape_id))
       .filter((c): c is [number, number][] => Boolean(c?.length));
@@ -864,7 +888,9 @@ export default function Index() {
       .filter(
         (v) =>
           v.kind === "utama" ||
-          (hoverDetail.route_id === "B" && v.kind === "alihan"),
+          (hoverMode === "krl" &&
+            hoverDetail.route_id === "B" &&
+            v.kind === "alihan"),
       )
       .map((v) => hoverDetail.geometryByShape?.[v.shape_id])
       .filter((c): c is [number, number][] => Boolean(c?.length));
@@ -900,6 +926,7 @@ export default function Index() {
     stationExpanded,
     hoverDetail,
     hoverRouteId,
+    hoverMode,
     detail,
     mode,
     airportDisplay,
@@ -932,7 +959,8 @@ export default function Index() {
       for (const r of stationRoutes) {
         const trunk = (r.variants ?? []).filter(
           (v) =>
-            v.kind === "utama" || (r.route_id === "B" && v.kind === "alihan"),
+            v.kind === "utama" ||
+            (mode === "krl" && r.route_id === "B" && v.kind === "alihan"),
         );
         const allow = trunk.length
           ? new Set(trunk.flatMap((v) => v.stopIds))
@@ -1108,10 +1136,23 @@ export default function Index() {
                     network faint underneath. First in the group because it
                     covers everything under it. */}
                 <SelectItem value="all">Semua Moda</SelectItem>
-                {MODES.map((m) => (
+                {MODES.filter((m) =>
+                  cityModes("jakarta").includes(m.value),
+                ).map((m) => (
                   <SelectItem key={m.value} value={m.value} disabled={!m.ready}>
                     {m.label}
                     {!m.ready && " (segera)"}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+              <SelectGroup>
+                <SelectLabel className="pl-4">Bandung</SelectLabel>
+                <SelectItem value="bandung-all">Semua Moda</SelectItem>
+                {MODES.filter((m) =>
+                  cityModes("bandung").includes(m.value),
+                ).map((m) => (
+                  <SelectItem key={m.value} value={m.value}>
+                    {m.label}
                   </SelectItem>
                 ))}
               </SelectGroup>
@@ -1228,6 +1269,7 @@ export default function Index() {
               <div className="-mr-4 -ml-4 mb-3 border-b border-white/10 pb-2">
                 <VariantPanel
                   detail={detail}
+                  mode={mode ?? undefined}
                   selected={variantTripId}
                   onSelect={setVariantTripId}
                   onClear={clearSelection}
@@ -1331,6 +1373,7 @@ export default function Index() {
           >
             <VariantPanel
               detail={detail}
+              mode={mode ?? undefined}
               selected={variantTripId}
               onSelect={setVariantTripId}
               onClear={clearSelection}
@@ -1368,7 +1411,9 @@ export default function Index() {
           // The all view follows the rail display rules (station floor,
           // interchanges, the airport marker); `allModes` switches the overview
           // to bus-faint / rail-bold styling.
-          mode={isAll ? "krl" : (view as TransitMode)}
+          mode={
+            isAll ? (view === "all" ? "krl" : "bdg-kci") : (view as TransitMode)
+          }
           allModes={isAll}
           forcePins={previewEnds.length > 0}
           routeStops={pinStops}
@@ -1401,7 +1446,7 @@ export default function Index() {
                 }
               : null
           }
-          onStopClick={handleStopClick}
+          onStopClick={(stop) => handleStopClick(stop, mode ?? undefined)}
           // Clicking empty map closes the open stop. Only the
           // station is cleared, not the route behind it, so the
           // user drops back to the route they were exploring
@@ -1422,6 +1467,7 @@ export default function Index() {
  */
 function VariantPanel({
   detail,
+  mode,
   selected,
   onSelect,
   onClear,
@@ -1430,6 +1476,7 @@ function VariantPanel({
   embedded = false,
 }: {
   detail: RouteDetail;
+  mode?: TransitMode;
   selected: string | null;
   onSelect: (tripId: string | null) => void;
   /** Clears the whole route selection; rendered in this panel's header. */
@@ -1458,6 +1505,7 @@ function VariantPanel({
   // between. They are not an outward/return pair: aligning them on two rails
   // would duplicate Jatinegara and imply stops in the wrong direction.
   const circuit =
+    mode === "krl" &&
     detail.route_id === "C" &&
     trunks.some(
       (v) =>
@@ -1641,7 +1689,7 @@ function VariantPanel({
                       ? `Putaran via ${v.via ?? v.headsign}`
                       : `Utama ${dirLabel(v.direction_id)} ${v.headsign}`
                   }
-                  sub={`${v.stopCount} ${detail.route_id === "C" ? "pemberhentian" : "halte"}${
+                  sub={`${v.stopCount} ${mode === "krl" || mode === "bdg-kci" || mode === "bdg-kai" ? "pemberhentian" : "halte"}${
                     v.headwaySecs
                       ? ` \u00b7 tiap ${Math.round(v.headwaySecs / 60)} mnt`
                       : ""
@@ -1712,9 +1760,11 @@ function VariantPanel({
 
         {!collapsed && (
           <p className="px-3 pt-1 pb-2.5 text-[10px] leading-snug text-white/35">
-            {detail.route_id === "C"
+            {mode === "krl" && detail.route_id === "C"
               ? "Pola dari OpenStreetMap; tidak ada jadwal kereta dalam data ini."
-              : "Hanya tampil bila dipilih. GTFS tidak mencatat pengalihan yang sedang berlaku."}
+              : mode?.startsWith("bdg-")
+                ? "Rute dari OpenStreetMap; tidak ada jadwal atau frekuensi dalam data ini."
+                : "Hanya tampil bila dipilih. GTFS tidak mencatat pengalihan yang sedang berlaku."}
           </p>
         )}
 
@@ -1728,7 +1778,9 @@ function VariantPanel({
         >
           <MapPin size={13} className="shrink-0 opacity-60" />
           <span className="min-w-0 flex-1 text-[10px] font-bold tracking-wide text-white/40 uppercase">
-            {detail.route_id === "C" ? "Pemberhentian" : "Halte"}
+            {mode === "krl" || mode === "bdg-kci" || mode === "bdg-kai"
+              ? "Pemberhentian"
+              : "Halte"}
             {stopCount > 0 ? " \u00b7 " + stopCount : ""}
           </span>
           <ChevronRight

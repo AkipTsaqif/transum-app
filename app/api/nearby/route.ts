@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { getNearbyStations } from "@/lib/gtfs";
 import { WALKING_RADIUS_M } from "@/utils/nearby";
+import { CITY_MODES } from "@/utils/cities";
 
 /**
- * GET /api/nearby?lat=&lon=&radius=
+ * GET /api/nearby?lat=&lon=&radius=&city=jakarta|bandung
  *
- * Stations of every dataset within a short walk of a point, closest first.
+ * Stations of one city within a short walk of a point, closest first.
  * Cross-system by design: a station's transfer options live in the OTHER
  * modes. The caller owns the listing rules (see utils/nearby.ts), so this
  * returns raw candidates and distances rather than a curated list.
@@ -44,12 +45,21 @@ export async function GET(request: Request) {
   // from turning one request into a full network dump.
   const clamped = Math.min(Math.max(radius, 1), 2000);
 
+  const city = searchParams.get("city");
+  if (city !== null && city !== "jakarta" && city !== "bandung") {
+    return NextResponse.json({ error: "Invalid city." }, { status: 400 });
+  }
+  // Retain the original Jakarta-only URL for existing callers.
+  const modes = city === "bandung" ? CITY_MODES.bandung : CITY_MODES.jakarta;
   try {
-    return NextResponse.json(await getNearbyStations(lat, lon, clamped), {
-      headers: {
-        "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+    return NextResponse.json(
+      await getNearbyStations(lat, lon, clamped, modes),
+      {
+        headers: {
+          "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+        },
       },
-    });
+    );
   } catch (err) {
     console.error("Failed to read nearby stations:", err);
     return NextResponse.json(

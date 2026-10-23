@@ -1,0 +1,25 @@
+{
+  "source": "OpenStreetMap relation full API",
+  "attribution": "© OpenStreetMap contributors",
+  "mode": "bdg-mjt",
+  "relations": [
+    14365267,
+    18765871,
+    18766205,
+    18766206,
+    18766207,
+    18766208,
+    14298213,
+    18770906,
+    14364569,
+    15660998,
+    18771078,
+    18771079,
+    19664371,
+    19664372,
+    19757704,
+    19757705
+  ],
+  "syncedAt": "2026-10-23T06:34:59.216Z",
+  "scope": "Validated operating Bandung commuter rail, Whoosh feeder and Metro Jabar Trans; no timetable or headway data."
+}

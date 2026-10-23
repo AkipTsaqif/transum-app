@@ -125,6 +125,12 @@ const ATTRIBUTION: Record<TransitMode, string> = {
   mrt: 'Data rute MRT \u00a9 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">kontributor OpenStreetMap</a> \u00b7 diolah',
   lrt: 'Data rute LRT Jakarta \u00a9 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">kontributor OpenStreetMap</a> \u00b7 diolah',
   lrtj: 'Data rute LRT Jabodebek \u00a9 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">kontributor OpenStreetMap</a> \u00b7 diolah',
+  "bdg-kci":
+    'Data rute KAI Commuter Bandung \u00a9 <a href="https://www.openstreetmap.org/copyright">kontributor OpenStreetMap</a> \u00b7 diolah',
+  "bdg-kai":
+    'Data rute KA Feeder \u00a9 <a href="https://www.openstreetmap.org/copyright">kontributor OpenStreetMap</a> \u00b7 diolah',
+  "bdg-mjt":
+    'Data rute Metro Jabar Trans \u00a9 <a href="https://www.openstreetmap.org/copyright">kontributor OpenStreetMap</a> \u00b7 diolah',
 };
 
 /**
@@ -693,7 +699,7 @@ const MainMapComponent = ({
   // and keep labels for when the user is actually zoomed in.
   // Fitting the whole KRL network (including Bogor) can settle around z9.
   // Keep Transjakarta's existing z10 route-pin gate unchanged.
-  const zoomThreshold = mode !== "gtfs" ? 9 : 10;
+  const zoomThreshold = mode !== "gtfs" && mode !== "bdg-mjt" ? 9 : 10;
   // Auto-fit frames a trunk anywhere from z11.9 to z15.8 depending on how
   // long it is, so a high fixed gate hid labels on most routes right after
   // the camera settled. Collision placement already drops labels that will
@@ -701,7 +707,7 @@ const MainMapComponent = ({
   // KRL and MRT have small station sets, so their names can be read at
   // the city-wide zoom a route fit settles on. Transjakarta's 6,437 names stay
   // gated: at this zoom they are an unreadable, expensive smear.
-  const labelThreshold = mode !== "gtfs" ? 9 : 11;
+  const labelThreshold = mode !== "gtfs" && mode !== "bdg-mjt" ? 9 : 11;
   const nearbyThreshold = 55;
   /**
    * Where the city-wide station dots begin. Transjakarta has 6,437 stops,
@@ -710,12 +716,14 @@ const MainMapComponent = ({
    * floor as the route pins. GTFS
    * keeps its separate z12 gate.
    */
-  const allStopsZoom = mode !== "gtfs" ? zoomThreshold : 12;
+  const allStopsZoom =
+    mode !== "gtfs" && mode !== "bdg-mjt" ? zoomThreshold : 12;
   /**
    * Names for the city-wide dots. Rail modes show them when the dots appear
    * at z9; Transjakarta keeps the higher gate.
    */
-  const allStopsLabelZoom = mode !== "gtfs" ? zoomThreshold : 14;
+  const allStopsLabelZoom =
+    mode !== "gtfs" && mode !== "bdg-mjt" ? zoomThreshold : 14;
 
   const mapRef = useRef<MapRef | null>(null);
 
@@ -1612,7 +1620,10 @@ const MainMapComponent = ({
               ? {
                   filter: [
                     "any",
-                    ["!=", ["get", "mode"], "gtfs"],
+                    [
+                      "!",
+                      ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]],
+                    ],
                     [">=", ["zoom"], 12],
                   ] as never,
                 }
