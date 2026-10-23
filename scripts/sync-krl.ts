@@ -31,6 +31,13 @@ interface LineConfig {
     mainDirections?: number;
     /** Passenger stops verified against the published KAI Commuter timetable. */
     servedStations?: string[];
+    /**
+     * Stations that operate on the line but are missing from the relation's
+     * stop members. They are added by name from nodes the relation already
+     * contains, then placed by their position on the track, so the line can be
+     * complete without inventing a coordinate.
+     */
+    extraStations?: string[];
 }
 
 const C_STATIONS: Record<string, string> = {
@@ -108,6 +115,28 @@ const LINES: LineConfig[] = [
         },
     },
     {
+        id: "R",
+        short: "R",
+        // Rangkasbitung line colour: KAI Commuter's green (#99ca3e).
+        color: "99CA3E",
+        // 15094546 is Tanah Abang -> Rangkasbitung, 2922215 the return.
+        relations: [15094546, 2922215],
+        longName: "Tanah Abang - Rangkasbitung",
+        // OSM refs are partial (THB, R04..R09, R11); the rest follow the
+        // operator's published R01-R22 numbering.
+        canonicalByName: {
+            "tanah abang": "R01", palmerah: "R02", kebayoran: "R03",
+            "pondok ranji": "R04", jurangmangu: "R05", sudimara: "R06",
+            "rawa buntu": "R07", serpong: "R08", cisauk: "R09",
+            cicayur: "R10", jatake: "R11", "parung panjang": "R12",
+            parungpanjang: "R12", cilejit: "R14", daru: "R15", tenjo: "R16",
+            tigaraksa: "R18", cikoya: "R19", maja: "R20", citeras: "R21",
+            rangkasbitung: "R22",
+        },
+        // Cikoya operates (R19) but is not a stop member of either relation.
+        extraStations: ["Cikoya"],
+    },
+    {
         id: "B",
         short: "B",
         // OSM route master 16877214 publishes #ec2329 for the Bogor line.
@@ -130,7 +159,7 @@ const MIRRORS = [
 ];
 const USER_AGENT =
     "transum-app/0.1 (+https://github.com/AkipTsaqif/transum-app) krl-sync";
-const STATION_BBOX = "-6.62,106.62,-6.10,107.17";
+const STATION_BBOX = "-6.62,106.12,-6.10,107.17";
 const MAX_JOIN_GAP_M = 20;
 const STATION_MATCH_M = 1000;
 const CLUSTER_M = 150;
@@ -232,7 +261,7 @@ async function fetchStationNodes(): Promise<{
                     const named = new Set(parsed.elements.map((n) => n.tags?.name));
                     // Mirrors sometimes return a valid JSON body from an empty
                     // or badly stale snapshot. Both endpoints must exist.
-                    if (named.has("Jakarta Kota") && named.has("Cikarang") && named.has("Tangerang") && named.has("Bogor") && named.has("Nambo")) {
+                    if (named.has("Jakarta Kota") && named.has("Cikarang") && named.has("Tangerang") && named.has("Bogor") && named.has("Nambo") && named.has("Rangkasbitung")) {
                         return {
                             nodes: parsed.elements,
                             timestamp: parsed.osm3s?.timestamp_osm_base ?? "",
@@ -521,6 +550,32 @@ function gather(
             lon: node.lon,
         };
     });
+    for (const name of cfg.extraStations ?? []) {
+        const key = nameKey(name);
+        if (calls.some((call) => nameKey(call.name) === key)) continue;
+        const node = [...nodes.values()].find(
+            (n) => nameKey(n.tags?.name ?? "") === key &&
+                /^(stop|station)$/.test(n.tags?.railway ?? "") &&
+                project(line, [n.lon, n.lat]).off < 120
+        );
+        if (!node) {
+            throw new Error(`Relation ${relation.id}: extra station ${name} not found on the track`);
+        }
+        calls.push({
+            id: stationId(cfg, node),
+            name: node.tags?.name ?? name,
+            lat: node.lat,
+            lon: node.lon,
+        });
+    }
+    if (cfg.extraStations?.length) {
+        // Added out of order; restore travel order by where they sit on the line.
+        calls.sort(
+            (a, b) =>
+                project(line, [a.lon, a.lat]).along - project(line, [b.lon, b.lat]).along
+        );
+    }
+
     const served = cfg.servedStations && new Set(cfg.servedStations.map(nameKey));
     const passengerCalls = served
         ? calls.filter((call) => served.has(nameKey(call.name)))
