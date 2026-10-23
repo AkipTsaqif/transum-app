@@ -43,15 +43,19 @@ import {
   type View,
 } from "@/utils/all-modes";
 import {
+  connectionRoutes,
+  samePlaceServices,
   walkingConnections,
   type NearbyConnection,
   type NearbyStation,
+  type SamePlaceService,
 } from "@/utils/nearby";
 import { airportDisplayFeatures } from "@/utils/krl-display";
 
 import { ArrowLeft, ChevronRight, MapPin, Route, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import type { TransitMode } from "@/lib/gtfs";
 
@@ -72,6 +76,9 @@ const MODES: { value: TransitMode; label: string; ready: boolean }[] = [
   },
   { value: "bdg-kai", label: "KA Feeder Whoosh (PT KAI)", ready: true },
   { value: "bdg-mjt", label: "Metro Jabar Trans", ready: true },
+  { value: "bdg-tmb", label: "Trans Metro Bandung", ready: true },
+  { value: "bdg-damri", label: "Bus Kota DAMRI", ready: true },
+  { value: "bdg-angkot", label: "Angkot Bandung", ready: true },
 ];
 /**
  * Baked data is served with an hour-long browser cache in production, which is
@@ -84,6 +91,15 @@ const MODES: { value: TransitMode; label: string; ready: boolean }[] = [
  */
 const NO_CACHE_IN_DEV: RequestInit =
   process.env.NODE_ENV === "production" ? {} : { cache: "no-store" };
+
+/** One operator's lines at a station, for the merged station card. */
+interface StationOperator {
+  mode: TransitMode;
+  name: string;
+  lat: number;
+  lon: number;
+  routes: StationDetail["routes"];
+}
 
 const modeLabel = (m: View) =>
   m === "all"
@@ -176,6 +192,8 @@ export default function Index() {
   // Cross-system transfers for the open station: stops of another service
   // within a short walk. Empty until the station resolves.
   const [connections, setConnections] = useState<NearbyConnection[]>([]);
+  // Other operators calling at the SAME platforms, not a walk away.
+  const [samePlace, setSamePlace] = useState<SamePlaceService[]>([]);
   // True once "tampilkan rute" has been pressed: the sidebar panel and the
   // drawn routes both follow from this, the popup alone does not.
   const [stationExpanded, setStationExpanded] = useState(false);
@@ -515,18 +533,15 @@ export default function Index() {
           )
           .then((near) => {
             if (ctrl.signal.aborted) return;
-            setConnections(
-              walkingConnections(
-                {
-                  mode: owner,
-                  name: detail.name,
-                  lat: detail.lat,
-                  lon: detail.lon,
-                  routes: detail.routes,
-                },
-                near,
-              ),
-            );
+            const clicked = {
+              mode: owner,
+              name: detail.name,
+              lat: detail.lat,
+              lon: detail.lon,
+              routes: detail.routes,
+            };
+            setConnections(walkingConnections(clicked, near));
+            setSamePlace(samePlaceServices(clicked, near));
           })
           .catch(() => {
             // Aborted or offline: the station card simply has no transfers.
@@ -692,17 +707,64 @@ export default function Index() {
     [handleStationClick],
   );
 
+  /**
+   * Every operator calling at this stop, this dataset's own first.
+   *
+   * The card lists them as one station: a separate "other operators" section
+   * made them look like a secondary fact when they are simply the rest of the
+   * same stop. Operators beyond the first are still resolved against their own
+   * dataset when picked.
+   */
+  const stationOperators = useMemo<StationOperator[]>(() => {
+    if (!station) return [];
+    const owner = stationMode ?? (isAll ? "gtfs" : (mode as TransitMode));
+    return [
+      {
+        mode: owner,
+        name: station.name,
+        lat: station.lat,
+        lon: station.lon,
+        routes: station.routes,
+      },
+      ...samePlace.map((entry) => ({
+        mode: entry.mode,
+        name: entry.name,
+        lat: entry.lat,
+        lon: entry.lon,
+        routes: entry.routes,
+      })),
+    ];
+  }, [station, stationMode, samePlace, isAll, mode]);
+
   const clearStation = useCallback(() => {
     stationAbortRef.current?.abort();
     setStation(null);
     setStationMode(null);
     setConnections([]);
+    setSamePlace([]);
     setStationAnchor(null);
     setStationRoutes([]);
     setStationError(null);
     setStationLoading(false);
     setStationExpanded(false);
   }, []);
+
+  /**
+   * Open a route from the station card, whichever operator runs it.
+   *
+   * Route ids are only unique inside a mode, so the operator decides the key.
+   * If the current view covers a single dataset, switch to the route's dataset
+   * first: otherwise the selection would point at a mode the view does not
+   * render and the map would stay empty.
+   */
+  const openRoute = useCallback(
+    (operator: TransitMode, routeId: string) => {
+      if (!viewModes.includes(operator)) setView(operator);
+      clearStation();
+      setSelectedKey(routeKey(operator, routeId));
+    },
+    [viewModes, clearStation],
+  );
 
   /**
    * Clear everything drawn, leaving the camera untouched. With no layers the
@@ -1055,7 +1117,28 @@ export default function Index() {
             );
           }),
         );
-        if (!ctrl.signal.aborted) setStopHits(lists.flat());
+        // One hit per PLACE: the same terminal is a separate stop in each
+        // operator's dataset, which showed up as the same name two or three
+        // times in the list. Keep the entry with the most routes, and merge
+        // the route count so the "N rute" figure spans operators.
+        const flat = lists.flat();
+        const merged: ModeStopHit[] = [];
+        for (const hit of flat.sort((a, b) => b.routeCount - a.routeCount)) {
+          const twin = merged.find(
+            (kept) =>
+              kept.name === hit.name &&
+              Math.hypot(
+                (kept.lon - hit.lon) * 111_320 * Math.cos(((kept.lat + hit.lat) * Math.PI) / 360),
+                (kept.lat - hit.lat) * 110_540,
+              ) <= 40,
+          );
+          if (twin) {
+            twin.routeCount = Math.max(twin.routeCount, hit.routeCount);
+            continue;
+          }
+          merged.push({ ...hit });
+        }
+        if (!ctrl.signal.aborted) setStopHits(merged);
       } catch {
         // Aborted or offline: routes still filter locally.
       }
@@ -1201,13 +1284,10 @@ export default function Index() {
                 loading={stationLoading}
                 error={stationError}
                 connections={connections}
+                operators={stationOperators}
                 onPickConnection={pickConnection}
                 onBack={clearStation}
-                onPickRoute={(id) => {
-                  const owner = stationMode ?? lineMode;
-                  clearStation();
-                  setSelectedKey(routeKey(owner, id));
-                }}
+                onPickRoute={openRoute}
               />
             )}
 
@@ -1431,9 +1511,11 @@ export default function Index() {
                 error={stationError}
                 expanded={stationExpanded}
                 connections={connections}
+                operators={stationOperators}
                 onShowRoutes={showStationRoutes}
                 onClose={clearStation}
                 onPickConnection={pickConnection}
+                onPickRoute={openRoute}
               />
             ) : null
           }
@@ -1870,18 +1952,23 @@ function StopPopupCard({
   error,
   expanded,
   connections,
+  operators,
   onShowRoutes,
   onClose,
   onPickConnection,
+  onPickRoute,
 }: {
   station: StationDetail;
   loading: boolean;
   error: string | null;
   expanded: boolean;
   connections: NearbyConnection[];
+  operators: StationOperator[];
   onShowRoutes: () => void;
   onClose: () => void;
   onPickConnection: (c: NearbyConnection) => void;
+  /** Open a route, whichever operator runs it. */
+  onPickRoute: (mode: TransitMode, routeId: string) => void;
 }) {
   return (
     <div className="w-56 overflow-hidden rounded-lg bg-jakarta text-white shadow-xl ring-1 ring-white/10">
@@ -1892,7 +1979,9 @@ function StopPopupCard({
             {station.name}
           </h2>
           <p className="mt-0.5 text-[11px] text-white/50">
-            {station.routes.length} rute
+            {operators.reduce((n, operator) => n + operator.routes.length, 0)}{" "}
+            rute
+            {operators.length > 1 && ` \u00b7 ${operators.length} operator`}
             {station.platforms > 1 && ` \u00b7 ${station.platforms} peron`}
           </p>
         </div>
@@ -1906,22 +1995,50 @@ function StopPopupCard({
         </button>
       </div>
 
-      {station.routes.length > 0 && (
-        <div className="flex flex-wrap gap-1 px-3 pb-2.5">
-          {station.routes.map((r) => (
-            <span
-              key={r.route_id}
-              title={r.route_long_name}
-              className="rounded px-1.5 py-0.5 text-[10px] leading-none font-bold font-pt-sans-narrow"
-              style={{
-                backgroundColor: `#${r.route_color}`,
-                color:
-                  calculateLuminance(r.route_color) > 0.5 ? "black" : "white",
-              }}
-            >
-              {r.route_short_name}
-            </span>
-          ))}
+      {operators.some((operator) => operator.routes.length > 0) && (
+        <div className="space-y-1 px-3 pb-2.5">
+          {operators.map((operator) => {
+            const chips = (
+              <div className="flex flex-wrap gap-1">
+                {operator.routes.map((r) => (
+                  <button
+                    key={r.route_id}
+                    type="button"
+                    onClick={() => onPickRoute(operator.mode, r.route_id)}
+                    title={`${r.route_long_name} \u00b7 ${modeLabel(operator.mode)}`}
+                    className="cursor-pointer rounded px-1.5 py-0.5 text-[10px] leading-none font-bold font-pt-sans-narrow transition-opacity hover:opacity-80"
+                    style={{
+                      backgroundColor: `#${r.route_color}`,
+                      color:
+                        calculateLuminance(r.route_color) > 0.5
+                          ? "black"
+                          : "white",
+                    }}
+                  >
+                    {r.route_short_name}
+                  </button>
+                ))}
+              </div>
+            );
+            // A single operator needs no label. Once the stop is shared, EVERY
+            // operator is named -- including the station's own dataset, which
+            // otherwise looked unlabelled next to the other two. `items-center`
+            // keeps the chips level with the name when it wraps.
+            if (operators.length === 1) {
+              return <div key={operator.mode}>{chips}</div>;
+            }
+            return (
+              <div
+                key={operator.mode}
+                className="flex w-full items-center gap-1.5 px-0.5"
+              >
+                <span className="w-[72px] shrink-0 text-[9px] leading-tight text-white/40">
+                  {modeLabel(operator.mode)}
+                </span>
+                <span className="min-w-0 flex-1">{chips}</span>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -1959,6 +2076,7 @@ function StopPanel({
   loading,
   error,
   connections,
+  operators,
   onBack,
   onPickRoute,
   onPickConnection,
@@ -1967,8 +2085,9 @@ function StopPanel({
   loading: boolean;
   error: string | null;
   connections: NearbyConnection[];
+  operators: StationOperator[];
   onBack: () => void;
-  onPickRoute: (routeId: string) => void;
+  onPickRoute: (mode: TransitMode, routeId: string) => void;
   onPickConnection: (c: NearbyConnection) => void;
 }) {
   return (
@@ -1992,7 +2111,8 @@ function StopPanel({
             {station.name}
           </h2>
           <p className="mt-0.5 text-xs text-white/60">
-            {station.routes.length} rute berhenti di sini
+            {operators.reduce((n, operator) => n + operator.routes.length, 0)}{" "}
+            rute berhenti di sini
             {loading && " \u00b7 memuat peta\u2026"}
           </p>
         </div>
@@ -2006,36 +2126,44 @@ function StopPanel({
 
       <Separator className="opacity-20" />
 
-      {station.routes.map((r) => (
-        <button
-          key={r.route_id}
-          type="button"
-          onClick={() => onPickRoute(r.route_id)}
-          className="flex w-full cursor-pointer items-center gap-2 p-2 pr-4 pl-4 text-left text-white transition-colors hover:bg-white/10"
-        >
-          <div
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold font-pt-sans-narrow"
-            style={{
-              backgroundColor: `#${r.route_color}`,
-              color:
-                calculateLuminance(r.route_color) > 0.5 ? "black" : "white",
-            }}
-          >
-            {r.route_short_name}
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="font-pt-sans">{r.route_long_name}</div>
-            {r.position && r.totalStops && (
-              <div className="text-xs text-white/50">
-                Halte ke-{r.position} dari {r.totalStops}
-                {r.position === 1 && " \u00b7 awal"}
-                {r.position === r.totalStops && " \u00b7 akhir"}
+      {operators.map((operator, index) => (
+        <div key={operator.mode}>
+          {operators.length > 1 && (
+            <div className="px-4 pt-2 pb-1 text-[10px] font-bold tracking-wide text-white/40 uppercase">
+              {modeLabel(operator.mode)}
+            </div>
+          )}
+          {operator.routes.map((r) => (
+            <button
+              key={r.route_id}
+              type="button"
+              onClick={() => onPickRoute(operator.mode, r.route_id)}
+              className="flex w-full cursor-pointer items-center gap-2 p-2 pr-4 pl-4 text-left text-white transition-colors hover:bg-white/10"
+            >
+              <div
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold font-pt-sans-narrow"
+                style={{
+                  backgroundColor: `#${r.route_color}`,
+                  color:
+                    calculateLuminance(r.route_color) > 0.5 ? "black" : "white",
+                }}
+              >
+                {r.route_short_name}
               </div>
-            )}
-          </div>
-        </button>
+              <div className="min-w-0 flex-1">
+                <div className="font-pt-sans">{r.route_long_name}</div>
+                {index === 0 && r.position && r.totalStops && (
+                  <div className="text-xs text-white/50">
+                    Halte ke-{r.position} dari {r.totalStops}
+                    {r.position === 1 && " \u00b7 awal"}
+                    {r.position === r.totalStops && " \u00b7 akhir"}
+                  </div>
+                )}
+              </div>
+            </button>
+          ))}
+        </div>
       ))}
-
       <ConnectionList connections={connections} onPick={onPickConnection} />
     </div>
   );
@@ -2058,8 +2186,48 @@ function ConnectionList({
   onPick: (c: NearbyConnection) => void;
   compact?: boolean;
 }) {
+  /**
+   * Hovered row's hidden routes, shown as a real floating tooltip.
+   *
+   * It is portalled to `document.body` and positioned `fixed` from the row's
+   * rect: the station card clips its own overflow, so an absolutely positioned
+   * child would be cut off at the card edge. A portal is the only way to float
+   * above everything without changing the card's clipping.
+   */
+  const [tip, setTip] = useState<{
+    key: string;
+    name: string;
+    routes: NearbyConnection["routes"];
+    left: number;
+    top: number;
+    above: boolean;
+  } | null>(null);
+
+  // The card can be replaced by another station while a tooltip is open.
+  useEffect(() => setTip(null), [connections]);
+
   if (!connections.length) return null;
   const shown = compact ? connections.slice(0, 5) : connections;
+  const limit = compact ? 2 : 3;
+  const TIP_WIDTH = 232;
+
+  const openTip = (key: string, name: string, routes: NearbyConnection["routes"], el: HTMLElement) => {
+    const box = el.getBoundingClientRect();
+    const above = box.top > 150;
+    const left = Math.min(
+      Math.max(8, box.left),
+      Math.max(8, window.innerWidth - TIP_WIDTH - 8),
+    );
+    setTip({
+      key,
+      name,
+      routes,
+      left,
+      top: above ? box.top - 6 : box.bottom + 6,
+      above,
+    });
+  };
+
   return (
     <div className="border-t border-white/10">
       <div className="px-3 pt-2 pb-1 text-[10px] font-bold tracking-wide text-white/40 uppercase">
@@ -2070,42 +2238,106 @@ function ConnectionList({
           </span>
         )}
       </div>
-      {shown.map((c) => (
-        <button
-          key={`${c.mode}:${c.name}@${c.lat},${c.lon}`}
-          type="button"
-          onClick={() => onPick(c)}
-          className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-white/10"
-        >
-          <div className="flex shrink-0 items-center gap-1">
-            {c.routes.slice(0, compact ? 2 : 3).map((r) => (
-              <span
-                key={r.route_id}
-                title={`${r.route_short_name} · ${r.route_long_name}`}
-                className="rounded px-1 py-0.5 text-[9px] leading-none font-bold font-pt-sans-narrow"
-                style={{
-                  backgroundColor: `#${r.route_color}`,
-                  color:
-                    calculateLuminance(r.route_color) > 0.5 ? "black" : "white",
-                }}
-              >
-                {r.route_short_name}
-              </span>
-            ))}
-            {c.routes.length > (compact ? 2 : 3) && (
-              <span className="text-[9px] text-white/40">
-                +{c.routes.length - (compact ? 2 : 3)}
-              </span>
-            )}
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-xs font-pt-sans">{c.name}</div>
-            <div className="truncate text-[10px] text-white/50">
-              {modeLabel(c.mode)} · {Math.round(c.distance)} m
+      {shown.map((c) => {
+        const key = `${c.mode}:${c.name}@${c.lat},${c.lon}`;
+        const { shown: badges, hidden } = connectionRoutes(c.routes, limit);
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => onPick(c)}
+            onPointerEnter={(e) => {
+              // Mouse only: on touch the emulated hover would flash a tooltip
+              // under the finger before the tap lands.
+              if (e.pointerType === "mouse" && hidden.length) {
+                openTip(key, c.name, hidden, e.currentTarget);
+              }
+            }}
+            onPointerLeave={(e) => {
+              if (e.pointerType === "mouse") {
+                setTip((prev) => (prev?.key === key ? null : prev));
+              }
+            }}
+            onFocus={(e) => {
+              if (hidden.length) openTip(key, c.name, hidden, e.currentTarget);
+            }}
+            onBlur={() => setTip((prev) => (prev?.key === key ? null : prev))}
+            aria-describedby={hidden.length ? `conn-tip-${key}` : undefined}
+            className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-white/10"
+          >
+            <div className="flex shrink-0 items-center gap-1">
+              {badges.map((r) => (
+                <span
+                  key={r.route_id}
+                  title={`${r.route_short_name} · ${r.route_long_name}`}
+                  className="rounded px-1 py-0.5 text-[9px] leading-none font-bold font-pt-sans-narrow"
+                  style={{
+                    backgroundColor: `#${r.route_color}`,
+                    color:
+                      calculateLuminance(r.route_color) > 0.5
+                        ? "black"
+                        : "white",
+                  }}
+                >
+                  {r.route_short_name}
+                </span>
+              ))}
+              {hidden.length > 0 && (
+                <span className="text-[9px] text-white/40">
+                  +{hidden.length}
+                </span>
+              )}
             </div>
-          </div>
-        </button>
-      ))}
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-xs font-pt-sans">{c.name}</div>
+              <div className="truncate text-[10px] text-white/50">
+                {modeLabel(c.mode)} · {Math.round(c.distance)} m
+              </div>
+            </div>
+          </button>
+        );
+      })}
+      {tip &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            id={`conn-tip-${tip.key}`}
+            role="tooltip"
+            style={{
+              left: tip.left,
+              top: tip.top,
+              width: TIP_WIDTH,
+              transform: tip.above ? "translateY(-100%)" : undefined,
+            }}
+            className="pointer-events-none fixed z-[80] rounded-md bg-jakarta/98 px-2 py-1.5 text-white shadow-xl ring-1 ring-white/15 backdrop-blur-sm"
+          >
+            <div className="px-0.5 pb-1 text-[9px] font-bold tracking-wide text-white/40 uppercase">
+              {tip.routes.length} rute lain · {tip.name}
+            </div>
+            <ul>
+              {tip.routes.map((r) => (
+                <li key={r.route_id} className="flex items-center gap-1.5 py-0.5">
+                  <span
+                    className="shrink-0 rounded px-1 py-0.5 text-[9px] leading-none font-bold font-pt-sans-narrow"
+                    style={{
+                      backgroundColor: `#${r.route_color}`,
+                      color:
+                        calculateLuminance(r.route_color) > 0.5
+                          ? "black"
+                          : "white",
+                    }}
+                  >
+                    {r.route_short_name}
+                  </span>
+                  <span className="truncate text-[10px] text-white/75">
+                    {r.route_long_name}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

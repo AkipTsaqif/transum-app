@@ -1,3 +1,13 @@
+import { readFileSync } from "node:fs";
+
+/** A baked station entry, by name, from one mode's index. */
+const stationEntry = (mode: string, name: string) => {
+  const stations = JSON.parse(
+    readFileSync(`data/${mode}/stops.json`, "utf8"),
+  ) as { name: string; routes: string[] }[];
+  return stations.find((s) => s.name === name);
+};
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -21,7 +31,14 @@ import type { OsmDocument } from "./rail-geometry";
 
 test("Bandung city owns only Bandung modes; Jakarta mode list remains intact", () => {
   assert.deepEqual(CITY_MODES.jakarta, ["krl", "mrt", "lrt", "lrtj", "gtfs"]);
-  assert.deepEqual(CITY_MODES.bandung, ["bdg-kci", "bdg-kai", "bdg-mjt"]);
+  assert.deepEqual(CITY_MODES.bandung, [
+    "bdg-kci",
+    "bdg-kai",
+    "bdg-mjt",
+    "bdg-tmb",
+    "bdg-damri",
+    "bdg-angkot",
+  ]);
   assert.equal(cityForMode("krl"), "jakarta");
   assert.equal(cityForMode("bdg-mjt"), "bandung");
   assert.ok(CITY_MODES.bandung.every((m) => TRANSIT_MODES.includes(m)));
@@ -44,7 +61,13 @@ test("baked Bandung systems contain only validated route ids and usable geometry
     );
     for (const summary of routes) {
       const detail = await getRouteDetail(summary.route_id, mode);
-      assert.ok(detail && detail.stops.length >= 3);
+      // Angkot is community-mapped and many corridors carry only their two
+      // termini; every other operator is expected to have real intermediates.
+      const minimumStops = mode === "bdg-angkot" ? 2 : 3;
+      assert.ok(
+        detail && detail.stops.length >= minimumStops,
+        `${mode}:${summary.route_id} has ${detail?.stops.length} stops`,
+      );
       assert.ok(
         detail.variants.every(
           (v) => v.headwaySecs === null && v.windows.length === 0,
@@ -65,6 +88,98 @@ test("baked Bandung systems contain only validated route ids and usable geometry
   );
   assert.equal((await getRouteDetail("C", "bdg-kci"))?.stops.length, 30);
   assert.equal((await getRouteDetail("KC", "bdg-kai"))?.stops.length, 3);
+  assert.deepEqual(
+    (await getRouteIndex("bdg-tmb")).map((r) => r.route_id),
+    ["K1", "K2", "K3", "K4", "K5", "F1", "F2"],
+  );
+  assert.deepEqual(
+    (await getRouteIndex("bdg-damri")).map((r) => r.route_id),
+    ["2", "6A", "8", "11", "KBP"],
+  );
+  const k1 = await getRouteDetail("K1", "bdg-tmb");
+  assert.equal(k1?.variants.length, 2);
+  const k1Name = new Map(k1!.stops.map((st) => [st.stop_id, st.stop_name]));
+  // Bus directions use different streets, so they are not reverses of each
+  // other -- but each must still start where the other ends.
+  const [out, back] = k1!.variants.map((v) => [
+    k1Name.get(v.stopIds[0]),
+    k1Name.get(v.stopIds.at(-1)!),
+  ]);
+  assert.deepEqual(out, [back[1], back[0]]);
+  assert.ok(k1!.variants.every((v) => v.stopIds.length > 20));
+  assert.ok(
+    k1!.variants.every((v) => v.headwaySecs === null && v.windows.length === 0),
+  );
+  assert.ok(
+    [...k1Name.values()].some((name) => name.includes("Cibiru")),
+    "K1 must still reach Cibiru",
+  );
+  const angkot = await getRouteIndex("bdg-angkot");
+  assert.equal(angkot.length, 115);
+  // OSM reuses trayek numbers, so a number can cover several corridors.
+  // They must stay separate lines, never one route spanning the city.
+  const angkot08 = angkot.filter((r) => /^08(-|$)/.test(r.route_id));
+  assert.deepEqual(
+    angkot08.map((r) => [r.route_id, r.route_short_name, r.route_long_name]),
+    [
+      ["08", "08", "Cicaheum/Kircon - Cibaduyut"],
+      ["08-2", "08", "Rancakalong - Tanjung Sari"],
+      ["08-3", "08", "Leuwipanjang - Cangkuang"],
+    ],
+  );
+  // The operator's number is the badge, repeats included: three 08 services in
+  // three parts of the region really are all "08". A synthetic id must never
+  // leak into what a rider reads.
+  assert.equal(
+    angkot.filter((r) => r.route_short_name.includes("-")).length,
+    0,
+  );
+  assert.ok(
+    BANDUNG_SYSTEMS["bdg-angkot"].every(
+      (line) => line.short && line.short.length <= 4,
+    ),
+    "badges must fit the round badge",
+  );
+  // Corridors with no short code derive an acronym, and those must not collide.
+  const derived = BANDUNG_SYSTEMS["bdg-angkot"].filter(
+    (line) => (line.refs?.[0] ?? line.id).length > 4,
+  );
+  const derivedShorts = derived.map((line) => line.short);
+  assert.ok(derived.length > 0);
+  assert.equal(new Set(derivedShorts).size, derivedShorts.length);
+  const rancakalong = stationEntry("bdg-angkot", "Rancakalong");
+  assert.deepEqual(rancakalong?.routes, ["08-2"]);
+  // Suffix ids must never take a genuine ref's place.
+  const genuine = new Set(
+    BANDUNG_SYSTEMS["bdg-angkot"].map((line) => line.refs?.[0] ?? line.id),
+  );
+  const synthetic = BANDUNG_SYSTEMS["bdg-angkot"].filter(
+    (line) => line.id !== (line.refs?.[0] ?? line.id),
+  );
+  assert.ok(synthetic.length > 0);
+  for (const line of synthetic) {
+    assert.ok(!genuine.has(line.id), `${line.id} shadows a genuine ref`);
+    assert.match(line.id, /-\d+$/);
+  }
+  assert.ok(
+    angkot.every((r) => r.route_short_name.length <= 4),
+    "angkot badges must fit the round badge",
+  );
+  const sampleAngkot = await getRouteDetail(angkot[0].route_id, "bdg-angkot");
+  assert.ok(sampleAngkot && sampleAngkot.variants.every((v) => v.headwaySecs === null));
+  const damri2 = await getRouteDetail("2", "bdg-damri");
+  assert.equal(
+    (await getRouteIndex("bdg-damri")).find((r) => r.route_id === "2")
+      ?.route_desc,
+    "Bus Kota DAMRI · Perum DAMRI",
+  );
+  assert.equal(damri2?.variants.every((v) => v.headwaySecs === null), true);
+  assert.equal(
+    (await getRouteIndex("bdg-tmb")).every(
+      (r) => r.route_desc.startsWith("Trans Metro Bandung"),
+    ),
+    true,
+  );
   assert.equal((await getRouteDetail("FD1", "bdg-mjt"))?.variants.length, 2);
   assert.equal((await searchStations("Cicalengka", 20, "bdg-kci")).length, 1);
   assert.equal(

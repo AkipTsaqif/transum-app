@@ -1,6 +1,6 @@
 import type { Feature, FeatureCollection, Geometry, LineString } from "geojson";
 import type { TransitMode } from "@/lib/gtfs";
-import { CITY_MODES, isBusMode } from "./cities";
+import { BUS_MODES, CITY_MODES, isBusMode } from "./cities";
 import type { RouteSummary } from "./types/gtfs";
 
 /**
@@ -82,14 +82,54 @@ export function mergeOverviews(
 export function mergeStopLayers(
   parts: { mode: TransitMode; layer: FeatureCollection | null }[],
 ): FeatureCollection {
-  const features: Feature<Geometry>[] = parts.flatMap(({ mode, layer }) =>
-    (layer?.features ?? []).map((feature) => ({
-      ...feature,
-      properties: { ...feature.properties, mode },
-    })),
-  );
+  const features: Feature<Geometry>[] = [];
+  for (const { mode, layer } of parts) {
+    for (const feature of layer?.features ?? []) {
+      const tagged: Feature<Geometry> = {
+        ...feature,
+        properties: { ...feature.properties, mode },
+      };
+      // Bus operators map the same terminal once each, a few metres apart
+      // (Leuwipanjang, Dago, Cicaheum). They are one place on the ground, so
+      // draw one dot and remember every dataset that stops there; the station
+      // card lists each operator's lines. Rail stays as it is: Manggarai on
+      // KRL and on LRT are genuinely two datasets and keep two symbols.
+      if (isBusMode(mode)) {
+        const twin = features.find(
+          (candidate) =>
+            isBusMode(candidate.properties?.mode as TransitMode) &&
+            candidate.properties?.name === feature.properties?.name &&
+            sameSpot(candidate, feature),
+        );
+        if (twin) {
+          const modes = new Set<string>(
+            (twin.properties?.modes as string[] | undefined) ?? [
+              String(twin.properties?.mode),
+            ],
+          );
+          modes.add(mode);
+          twin.properties = { ...twin.properties, modes: [...modes] };
+          continue;
+        }
+      }
+      features.push(tagged);
+    }
+  }
   return { type: "FeatureCollection", features };
 }
+
+/** Two bus stop features closer than a platform length. */
+const sameSpot = (a: Feature<Geometry>, b: Feature<Geometry>) => {
+  if (a.geometry.type !== "Point" || b.geometry.type !== "Point") return false;
+  const [alon, alat] = a.geometry.coordinates;
+  const [blon, blat] = b.geometry.coordinates;
+  return (
+    Math.hypot(
+      (alon - blon) * 111_320 * Math.cos(((alat + blat) * Math.PI) / 360),
+      (alat - blat) * 110_540,
+    ) <= 40
+  );
+};
 
 /** What the mode picker can show: one dataset, or every dataset together. */
 export type View = TransitMode | "all" | "bandung-all";
@@ -139,7 +179,7 @@ export function overviewLinePaint(
   allModes: boolean,
   mode: TransitMode,
 ): Record<string, unknown> {
-  const isBus = ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]];
+  const isBus = ["in", ["get", "mode"], ["literal", [...BUS_MODES]]];
   return {
     "line-color": ["get", "color"],
     // Only the airport and the LRT trunk carry a signed screen-space offset.
@@ -180,12 +220,12 @@ export const allStopsLabelFilter = (): unknown[] => [
   "any",
   [
     "all",
-    ["!", ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]]],
+    ["!", ["in", ["get", "mode"], ["literal", [...BUS_MODES]]]],
     [">=", ["zoom"], 12],
   ],
   [
     "all",
-    ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]],
+    ["in", ["get", "mode"], ["literal", [...BUS_MODES]]],
     [">=", ["zoom"], 14],
   ],
 ];

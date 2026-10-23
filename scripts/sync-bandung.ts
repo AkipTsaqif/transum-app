@@ -85,7 +85,13 @@ async function main() {
         relations,
         syncedAt: new Date().toISOString(),
         scope:
-          "Validated operating Bandung commuter rail, Whoosh feeder and Metro Jabar Trans; no timetable or headway data.",
+          "Validated operating Bandung rail, Metro Jabar Trans, Trans Metro Bandung, Bus Kota DAMRI and angkot trayek from OpenStreetMap; no timetable or headway data.",
+        ...(mode === "bdg-angkot"
+          ? {
+              validation:
+                "Every relation must pass bakeBandung: two or more named stops, one continuous way chain, stops on that chain in travel order. Mapped angkot relations that fail these checks are omitted rather than drawn approximately.",
+            }
+          : {}),
       },
     };
     for (const detail of baked.details)

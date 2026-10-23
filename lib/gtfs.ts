@@ -24,7 +24,17 @@ import type {
  *   bdg-mjt  data/bdg-mjt/  Metro Jabar Trans (sync:bandung)
  */
 export type TransitMode =
-  "gtfs" | "krl" | "mrt" | "lrt" | "lrtj" | "bdg-kci" | "bdg-kai" | "bdg-mjt";
+  | "gtfs"
+  | "krl"
+  | "mrt"
+  | "lrt"
+  | "lrtj"
+  | "bdg-kci"
+  | "bdg-kai"
+  | "bdg-mjt"
+  | "bdg-tmb"
+  | "bdg-damri"
+  | "bdg-angkot";
 
 /** Every mode, for `generateStaticParams`. */
 export const TRANSIT_MODES: TransitMode[] = [
@@ -36,6 +46,9 @@ export const TRANSIT_MODES: TransitMode[] = [
   "bdg-kci",
   "bdg-kai",
   "bdg-mjt",
+  "bdg-tmb",
+  "bdg-damri",
+  "bdg-angkot",
 ];
 
 /** Anything unrecognised falls back to the default rather than erroring. */

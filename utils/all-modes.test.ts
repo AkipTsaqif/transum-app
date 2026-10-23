@@ -70,6 +70,9 @@ test("all-modes view lists rail before bus, each mode once", () => {
     "bdg-kci",
     "bdg-kai",
     "bdg-mjt",
+    "bdg-tmb",
+    "bdg-damri",
+    "bdg-angkot",
   ]);
 });
 
@@ -185,6 +188,9 @@ test("view parsing accepts every dataset mode plus all, and nothing else", () =>
     "bdg-kci",
     "bdg-kai",
     "bdg-mjt",
+    "bdg-tmb",
+    "bdg-damri",
+    "bdg-angkot",
     "bandung-all",
   ]) {
     assert.equal(parseView(v), v);
@@ -197,7 +203,15 @@ test("overview paint is valid MapLibre style and keeps zoom at the top level", (
   // MapLibre rejects a zoom expression nested inside `case`; this catches that
   // class of bug without a browser.
   for (const allModes of [true, false]) {
-    for (const mode of ["gtfs", "krl", "bdg-kci", "bdg-mjt"] as TransitMode[]) {
+    for (const mode of [
+      "gtfs",
+      "krl",
+      "bdg-kci",
+      "bdg-mjt",
+      "bdg-tmb",
+      "bdg-damri",
+      "bdg-angkot",
+    ] as TransitMode[]) {
       const paint = overviewLinePaint(allModes, mode);
       const style = {
         version: 8 as const,
@@ -260,12 +274,12 @@ test("all-mode station names start at z12, bus stop names later", () => {
     "any",
     [
       "all",
-      ["!", ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]]],
+      ["!", ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt", "bdg-tmb", "bdg-damri", "bdg-angkot"]]]],
       [">=", ["zoom"], 12],
     ],
     [
       "all",
-      ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt"]]],
+      ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt", "bdg-tmb", "bdg-damri", "bdg-angkot"]]],
       [">=", ["zoom"], 14],
     ],
   ]);

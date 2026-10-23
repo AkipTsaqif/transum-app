@@ -14,6 +14,7 @@ import {
   type OsmRelation,
   type OsmWay,
 } from "./rail-geometry";
+import { BANDUNG_ANGKOT_LINES } from "./bandung-angkot";
 
 export interface BandungLine {
   id: string;
@@ -24,6 +25,16 @@ export interface BandungLine {
   relations: readonly number[];
   /** Only served stations, in geographic order. Used to reject silent OSM edits. */
   stations?: readonly string[];
+  /** OSM `network` tag. Defaults to the operator implied by `kind` and `id`. */
+  network?: string;
+  /** OSM `ref` values for this line, when they are not simply `id`. */
+  refs?: readonly string[];
+  /** `route_desc` shown in the app. Defaults to the operator label. */
+  service?: string;
+  /** Short badge text when the id is too long to render (angkot corridors). */
+  short?: string;
+  /** Accept any OSM network value; angkot uses two different network tags. */
+  anyNetwork?: boolean;
 }
 export const BANDUNG_SYSTEMS = {
   "bdg-kci": [
@@ -157,6 +168,127 @@ export const BANDUNG_SYSTEMS = {
       relations: [19757704, 19757705],
     },
   ],
+  // Neither operator publishes per-corridor hex codes, so these are a display
+  // palette: one distinct hue per corridor, not an official livery colour.
+  "bdg-tmb": [
+    {
+      id: "K1",
+      name: "Cibiru - Cibeureum",
+      color: "D71920",
+      kind: "bus",
+      network: "Trans Metro Bandung",
+      service: "Trans Metro Bandung \u00b7 Dishub Kota Bandung",
+      relations: [18768804, 18768805],
+    },
+    {
+      id: "K2",
+      name: "Cicaheum - Cibeureum",
+      color: "F26522",
+      kind: "bus",
+      network: "Trans Metro Bandung",
+      service: "Trans Metro Bandung \u00b7 Dishub Kota Bandung",
+      relations: [15520324, 17329177],
+    },
+    {
+      id: "K3",
+      name: "Cicaheum - Sarijadi",
+      color: "FDB913",
+      kind: "bus",
+      network: "Trans Metro Bandung",
+      service: "Trans Metro Bandung \u00b7 Dishub Kota Bandung",
+      relations: [17564612, 17564831],
+    },
+    {
+      id: "K4",
+      name: "Antapani - Leuwipanjang",
+      color: "00A651",
+      kind: "bus",
+      network: "Trans Metro Bandung",
+      service: "Trans Metro Bandung \u00b7 Dishub Kota Bandung",
+      relations: [15555901, 17770945],
+    },
+    {
+      id: "K5",
+      name: "Antapani - Stasiun Hall",
+      color: "0072BC",
+      kind: "bus",
+      network: "Trans Metro Bandung",
+      service: "Trans Metro Bandung \u00b7 Dishub Kota Bandung",
+      relations: [15555900, 17350725],
+    },
+    {
+      id: "F1",
+      name: "Stasiun Hall - Gunung Batu",
+      color: "8A2BE2",
+      kind: "bus",
+      network: "Trans Metro Bandung",
+      service: "Trans Metro Bandung feeder \u00b7 Dishub Kota Bandung",
+      relations: [17772446, 17772447],
+    },
+    {
+      id: "F2",
+      name: "Summarecon Mall - Cibeureum",
+      color: "A0522D",
+      kind: "bus",
+      network: "Trans Metro Bandung",
+      service: "Trans Metro Bandung feeder \u00b7 Dishub Kota Bandung",
+      relations: [17771075, 17772429],
+    },
+  ],
+  "bdg-damri": [
+    {
+      id: "2",
+      name: "Leuwipanjang - Ledeng",
+      color: "00539F",
+      kind: "bus",
+      network: "Bus Kota Damri",
+      refs: ["DAMRI 2"],
+      service: "Bus Kota DAMRI \u00b7 Perum DAMRI",
+      relations: [17771220, 17771221],
+    },
+    {
+      id: "6A",
+      name: "Elang - Jatinangor",
+      color: "00AEEF",
+      kind: "bus",
+      network: "Bus Kota Damri",
+      refs: ["6A", "DAMRI 6A"],
+      service: "Bus Kota DAMRI \u00b7 Perum DAMRI",
+      relations: [17771076, 17772430],
+    },
+    {
+      id: "8",
+      name: "Tanjungsari - Kebon Kelapa",
+      color: "1B5EAA",
+      kind: "bus",
+      network: "Bus Kota Damri",
+      refs: ["DAMRI 8"],
+      service: "Bus Kota DAMRI \u00b7 Perum DAMRI",
+      relations: [17565369, 17771073],
+    },
+    {
+      id: "11",
+      name: "Leuwipanjang - Cibiru",
+      color: "3AA6DD",
+      kind: "bus",
+      network: "Bus Kota Damri",
+      refs: ["DAMRI 11"],
+      service: "Bus Kota DAMRI \u00b7 Perum DAMRI",
+      relations: [17771219, 17771223],
+    },
+    {
+      id: "KBP",
+      name: "Alun-alun Bandung - Kota Baru Parahyangan",
+      color: "0F3D6E",
+      kind: "bus",
+      network: "Bus Kota Damri",
+      refs: ["KBP"],
+      service: "Bus Kota DAMRI \u00b7 Perum DAMRI",
+      relations: [18771222, 18771223],
+    },
+  ],
+  // Generated from a validated OSM scan; see utils/bandung-angkot.ts.
+  "bdg-angkot": BANDUNG_ANGKOT_LINES,
 } as const satisfies Record<string, readonly BandungLine[]>;
 export type BandungSystem = keyof typeof BANDUNG_SYSTEMS;
 
@@ -186,27 +318,51 @@ function extract(doc: OsmDocument, line: BandungLine, id: number): Direction {
   const relation = doc.elements.find(
     (e): e is OsmRelation => e.type === "relation" && e.id === id,
   );
+  const network =
+    line.network ??
+    (line.kind === "bus"
+      ? "Metro Jabar Trans"
+      : line.id === "KC"
+        ? "KAI"
+        : "KAI Commuter");
+  const refs = line.refs ?? [line.id];
   if (
     !relation ||
     relation.tags?.route !== line.kind ||
-    relation.tags?.network !==
-      (line.kind === "bus"
-        ? "Metro Jabar Trans"
-        : line.id === "KC"
-          ? "KAI"
-          : "KAI Commuter") ||
-    relation.tags?.ref !== line.id
+    (!line.anyNetwork && relation.tags?.network !== network) ||
+    !refs.includes(relation.tags?.ref ?? "")
   ) {
     throw new Error(`Bandung relation ${id} no longer matches ${line.id}`);
   }
-  const calls = relation.members
-    .filter((m) => m.type === "node" && STOP_ROLES.has(m.role))
-    .map((m) => {
-      const node = nodes.get(m.ref);
-      if (!node?.tags?.name)
-        throw new Error(`${id} missing named stop ${m.ref}`);
-      return { name: node.tags.name, point: [node.lon, node.lat] as LngLat };
-    });
+  // Some routes tag the name on the neighbouring platform and leave the
+  // stop_position itself unnamed. Use that platform's name; drop a stop only
+  // when nothing nearby names it, and say so.
+  const namedPlatforms = relation.members
+    .filter((m) => m.type === "node" && m.role === "platform")
+    .map((m) => nodes.get(m.ref))
+    .filter((n): n is OsmNode => Boolean(n?.tags?.name));
+  const calls: Call[] = [];
+  for (const m of relation.members) {
+    if (m.type !== "node" || !STOP_ROLES.has(m.role)) continue;
+    const node = nodes.get(m.ref);
+    if (!node) throw new Error(`${id} missing stop node ${m.ref}`);
+    let name = node.tags?.name?.trim();
+    if (!name) {
+      const nearest = namedPlatforms
+        .map((n) => ({
+          name: n.tags!.name!,
+          distance: metres([n.lon, n.lat], [node.lon, node.lat]),
+        }))
+        .filter((n) => n.distance < 60)
+        .sort((a, b) => a.distance - b.distance)[0];
+      if (!nearest) {
+        console.warn(`  ! ${id} drops unnamed stop ${m.ref} with no platform`);
+        continue;
+      }
+      name = nearest.name;
+    }
+    calls.push({ name, point: [node.lon, node.lat] as LngLat });
+  }
   if (calls.length < 2 || calls.some((c) => !c.name.trim()))
     throw new Error(`${id} has missing stops`);
   if (line.stations) {
@@ -220,7 +376,9 @@ function extract(doc: OsmDocument, line: BandungLine, id: number): Direction {
       );
     }
   }
-  const members = relation.members.filter((m) => m.type === "way");
+  const declared = relation.members.filter((m) => m.type === "way");
+  /** Walk the member ways in their declared order, joining shared nodes. */
+  const walk = (members: typeof declared): number[] => {
   const sequence: number[] = [];
   for (let k = 0; k < members.length; k++) {
     const way = ways.get(members[k].ref);
@@ -260,6 +418,41 @@ function extract(doc: OsmDocument, line: BandungLine, id: number): Direction {
     else if (segment.at(-1) === end)
       sequence.push(...segment.reverse().slice(1));
     else throw new Error(`${id} disconnected at way ${way.id}`);
+  }
+  return sequence;
+  };
+  /**
+   * Some bus relations list their ways out of travel order. That is a mapping
+   * detail, not a data defect, so fall back to joining ways by shared endpoint
+   * nodes in member order. No geometry is invented: every way still comes from
+   * the relation, and a chain that cannot be completed still throws.
+   */
+  const reorderBySharedNodes = (members: typeof declared) => {
+    const pool = members.map((m) => ({ member: m, nodes: [...(ways.get(m.ref)?.nodes ?? [])] }));
+    if (pool.some((p) => p.nodes.length < 2)) return null;
+    const order = [pool.shift()!];
+    let tailNode = order[0].nodes.at(-1)!;
+    while (pool.length) {
+      const next = pool.findIndex(
+        (p) => p.nodes[0] === tailNode || p.nodes.at(-1) === tailNode,
+      );
+      if (next < 0) return null;
+      const [candidate] = pool.splice(next, 1);
+      if (candidate.nodes[0] !== tailNode) candidate.nodes.reverse();
+      tailNode = candidate.nodes.at(-1)!;
+      order.push(candidate);
+    }
+    return order.map((p) => p.member);
+  };
+  let members = declared;
+  let sequence: number[];
+  try {
+    sequence = walk(members);
+  } catch (error) {
+    const reordered = reorderBySharedNodes(declared);
+    if (!reordered) throw error;
+    members = reordered;
+    sequence = walk(members);
   }
   if (!sequence.length) throw new Error(`${id} has no geometry`);
   const positions = relation.members
@@ -358,14 +551,15 @@ export function bakeBandung(
   for (const { config, directions } of parsed) {
     const summary: RouteSummary = {
       route_id: config.id,
-      route_short_name: config.id,
+      route_short_name: config.short ?? config.id,
       route_long_name: config.name,
       route_desc:
-        config.kind === "bus"
+        config.service ??
+        (config.kind === "bus"
           ? "Metro Jabar Trans"
           : config.id === "KC"
-            ? "KA Feeder Whoosh · PT KAI"
-            : "Commuter Line · KAI Commuter",
+            ? "KA Feeder Whoosh \u00b7 PT KAI"
+            : "Commuter Line \u00b7 KAI Commuter"),
       route_color: config.color,
       route_text_color: "FFFFFF",
     };
