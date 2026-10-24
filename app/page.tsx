@@ -101,6 +101,14 @@ interface StationOperator {
   routes: StationDetail["routes"];
 }
 
+/**
+ * True on touch-first devices.
+ *
+ * Hover is not a mobile capability, so anything that only appears on hover has
+ * to be shown another way. Coarse pointers get that content inline.
+ */
+const useCoarsePointer = () => useMediaQuery("(pointer: coarse)");
+
 const modeLabel = (m: View) =>
   m === "all"
     ? "Semua Moda · Jakarta"
@@ -1467,6 +1475,24 @@ export default function Index() {
           </div>
         )}
 
+        {!isWide && station && (
+          <div className="pointer-events-auto absolute inset-x-2 bottom-2 z-20">
+            <StopPopupCard
+              station={station}
+              loading={stationLoading}
+              error={stationError}
+              expanded={stationExpanded}
+              connections={connections}
+              operators={stationOperators}
+              onShowRoutes={showStationRoutes}
+              onClose={clearStation}
+              onPickConnection={pickConnection}
+              onPickRoute={openRoute}
+              fluid
+            />
+          </div>
+        )}
+
         <MainMapComponent
           layers={layers}
           previewLayer={previewLayer}
@@ -1507,8 +1533,12 @@ export default function Index() {
           showAllStops={showAllStops}
           onStationClick={handleStationClick}
           onNeedAllStops={loadAllStops}
+          // A MapLibre popup is anchored to a point and cannot be kept inside
+          // a phone-sized map: measured at 390 px it ran off the right edge and
+          // below the map. Phones use the in-map card above; the popup stays
+          // for desktop, where it can point at the stop.
           stopPopup={
-            station ? (
+            isWide && station ? (
               <StopPopupCard
                 station={station}
                 loading={stationLoading}
@@ -1961,6 +1991,7 @@ function StopPopupCard({
   onClose,
   onPickConnection,
   onPickRoute,
+  fluid = false,
 }: {
   station: StationDetail;
   loading: boolean;
@@ -1973,9 +2004,13 @@ function StopPopupCard({
   onPickConnection: (c: NearbyConnection) => void;
   /** Open a route, whichever operator runs it. */
   onPickRoute: (mode: TransitMode, routeId: string) => void;
+  /** Fill the available width (phone card) instead of a fixed 224 px. */
+  fluid?: boolean;
 }) {
   return (
-    <div className="w-56 overflow-hidden rounded-lg bg-jakarta text-white shadow-xl ring-1 ring-white/10">
+    <div
+      className={`${fluid ? "w-full" : "w-56"} max-h-[45vh] overflow-y-auto rounded-lg bg-jakarta text-white shadow-xl ring-1 ring-white/10`}
+    >
       <div className="flex items-start gap-2 px-3 pt-2.5 pb-2">
         <MapPin size={13} className="mt-0.5 shrink-0 opacity-60" />
         <div className="min-w-0 flex-1">
@@ -2010,7 +2045,7 @@ function StopPopupCard({
                     type="button"
                     onClick={() => onPickRoute(operator.mode, r.route_id)}
                     title={`${r.route_long_name} \u00b7 ${modeLabel(operator.mode)}`}
-                    className="cursor-pointer rounded px-1.5 py-0.5 text-[10px] leading-none font-bold font-pt-sans-narrow transition-opacity hover:opacity-80"
+                    className="cursor-pointer rounded px-1.5 py-1 text-[10px] leading-none font-bold font-pt-sans-narrow transition-opacity hover:opacity-80"
                     style={{
                       backgroundColor: `#${r.route_color}`,
                       color:
@@ -2206,6 +2241,9 @@ function ConnectionList({
     top: number;
     above: boolean;
   } | null>(null);
+  // A tooltip needs a pointer that can hover. On touch the same information is
+  // printed under each row, so nothing hides behind an impossible gesture.
+  const coarse = useCoarsePointer();
 
   // The card can be replaced by another station while a tooltip is open.
   useEffect(() => setTip(null), [connections]);
@@ -2246,8 +2284,8 @@ function ConnectionList({
         const key = `${c.mode}:${c.name}@${c.lat},${c.lon}`;
         const { shown: badges, hidden } = connectionRoutes(c.routes, limit);
         return (
+          <div key={key}>
           <button
-            key={key}
             type="button"
             onClick={() => onPick(c)}
             onPointerEnter={(e) => {
@@ -2266,15 +2304,17 @@ function ConnectionList({
               if (hidden.length) openTip(key, c.name, hidden, e.currentTarget);
             }}
             onBlur={() => setTip((prev) => (prev?.key === key ? null : prev))}
-            aria-describedby={hidden.length ? `conn-tip-${key}` : undefined}
-            className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-white/10"
+            aria-describedby={
+              hidden.length && !coarse ? `conn-tip-${key}` : undefined
+            }
+            className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-white/10"
           >
             <div className="flex shrink-0 items-center gap-1">
               {badges.map((r) => (
                 <span
                   key={r.route_id}
                   title={`${r.route_short_name} · ${r.route_long_name}`}
-                  className="rounded px-1 py-0.5 text-[9px] leading-none font-bold font-pt-sans-narrow"
+                  className="rounded px-1 py-1 text-[9px] leading-none font-bold font-pt-sans-narrow"
                   style={{
                     backgroundColor: `#${r.route_color}`,
                     color:
@@ -2299,6 +2339,30 @@ function ConnectionList({
               </div>
             </div>
           </button>
+          {coarse && hidden.length > 0 && (
+            <ul className="mb-1 ml-3 border-l border-white/15 pl-2">
+              {hidden.map((r) => (
+                <li key={r.route_id} className="flex items-center gap-1.5 py-1 pr-3">
+                  <span
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-bold font-pt-sans-narrow"
+                    style={{
+                      backgroundColor: `#${r.route_color}`,
+                      color:
+                        calculateLuminance(r.route_color) > 0.5
+                          ? "black"
+                          : "white",
+                    }}
+                  >
+                    {r.route_short_name}
+                  </span>
+                  <span className="truncate text-[11px] text-white/70">
+                    {r.route_long_name}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          </div>
         );
       })}
       {tip &&
