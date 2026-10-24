@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getNearbyStations } from "@/lib/gtfs";
 import { WALKING_RADIUS_M } from "@/utils/nearby";
-import { CITY_MODES } from "@/utils/cities";
+import { CITY_MODES, isCity } from "@/utils/cities";
 
 /**
  * GET /api/nearby?lat=&lon=&radius=&city=jakarta|bandung
@@ -45,12 +45,14 @@ export async function GET(request: Request) {
   // from turning one request into a full network dump.
   const clamped = Math.min(Math.max(radius, 1), 2000);
 
-  const city = searchParams.get("city");
-  if (city !== null && city !== "jakarta" && city !== "bandung") {
+  // Validated against the city registry, not a hardcoded pair, so a new city
+  // works here as soon as it is added to CITY_MODES.
+  const rawCity = searchParams.get("city");
+  if (rawCity !== null && !isCity(rawCity)) {
     return NextResponse.json({ error: "Invalid city." }, { status: 400 });
   }
   // Retain the original Jakarta-only URL for existing callers.
-  const modes = city === "bandung" ? CITY_MODES.bandung : CITY_MODES.jakarta;
+  const modes = rawCity === null ? CITY_MODES.jakarta : CITY_MODES[rawCity];
   try {
     return NextResponse.json(
       await getNearbyStations(lat, lon, clamped, modes),

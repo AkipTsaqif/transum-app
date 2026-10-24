@@ -15,7 +15,7 @@ import {
   bakeBandung,
   type BandungSystem,
 } from "./bandung-data";
-import { CITY_MODES, cityForMode, cityModes } from "./cities";
+import { CITIES, CITY_MODES, cityForMode, cityModes, isCity } from "./cities";
 import {
   TRANSIT_MODES,
   getRouteDetail,
@@ -28,6 +28,27 @@ import {
 } from "../lib/gtfs";
 import type { FeatureCollection } from "geojson";
 import type { OsmDocument } from "./rail-geometry";
+
+test("the city registry is the only place a dataset is assigned to a city", () => {
+  // Every mode must belong to exactly one city: an unregistered mode would
+  // otherwise be searched with another city's datasets and map credit.
+  for (const mode of TRANSIT_MODES) {
+    const owners = CITIES.filter((city) =>
+      (CITY_MODES[city] as readonly string[]).includes(mode),
+    );
+    assert.equal(owners.length, 1, `${mode} must belong to exactly one city`);
+    assert.equal(cityForMode(mode), owners[0]);
+  }
+  // A future city is a single entry in CITY_MODES; nothing here should need a
+  // second hardcoded list.
+  assert.deepEqual(CITIES, Object.keys(CITY_MODES));
+  assert.equal(isCity("jakarta"), true);
+  assert.equal(isCity("bandung"), true);
+  assert.equal(isCity("surabaya"), false);
+  assert.equal(isCity(null), false);
+  // Unknown modes are a programming error, not a silent fallback to Jakarta.
+  assert.throws(() => cityForMode("surabaya" as never));
+});
 
 test("Bandung city owns only Bandung modes; Jakarta mode list remains intact", () => {
   assert.deepEqual(CITY_MODES.jakarta, ["krl", "mrt", "lrt", "lrtj", "gtfs"]);
