@@ -114,9 +114,13 @@ export default function Index() {
   // the picker can narrow to a single system from there.
   const [view, setView] = useState<View>("all");
   const isAll = view === "all" || view === "bandung-all";
-  // A request number, not a boolean: each deliberate mode switch asks the
-  // map to fit the new network exactly once, after its overview has loaded.
-  const [overviewFitRequest, setOverviewFitRequest] = useState(0);
+  // A request number, not a boolean: each deliberate mode switch asks the map
+  // to fit the new network exactly once, after its overview has loaded.
+  // Starts at 1 because the FIRST load needs a fit too -- the fallback
+  // initialViewState is a fixed Jakarta camera that leaves Bogor and
+  // Rangkasbitung outside the frame, so "Semua Moda" looked like Transjakarta
+  // only until the user switched datasets.
+  const [overviewFitRequest, setOverviewFitRequest] = useState(1);
   const [searchQuery, setSearchQuery] = useState<string>("");
 
   // Every listed route, tagged with the dataset it comes from. In a single

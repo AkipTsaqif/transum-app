@@ -10,7 +10,7 @@ test("one shared station yields two distinct physical endpoints and one label", 
     const groups = interchangesFromStops(stops);
     assert.deepEqual(groups.map((g) => g.name).sort(), [
         "BNI City", "Batu Ceper", "Duri", "Jakarta Kota",
-        "Kampung Bandan", "Manggarai", "Rawa Buaya",
+        "Kampung Bandan", "Manggarai", "Rawa Buaya", "Tanah Abang",
     ]);
     const group = groups.find((candidate) => candidate.name === "Kampung Bandan")!;
     const { pills, labels, endpoints } = interchangeFeatures([group]);
@@ -51,7 +51,10 @@ test("far-out stations display two distinguishable endpoints on every zoom", () 
 
 test("ordinary stops do not grow interchange markers", () => {
     const ordinary = { ...stops, features: stops.features.filter((f) =>
-        !["Jakarta Kota", "Kampung Bandan", "Duri", "Manggarai", "BNI City", "Rawa Buaya", "Batu Ceper"].includes(String(f.properties?.name))
+        ![
+            "Jakarta Kota", "Kampung Bandan", "Duri", "Manggarai",
+            "BNI City", "Rawa Buaya", "Batu Ceper", "Tanah Abang",
+        ].includes(String(f.properties?.name))
     ) };
     assert.deepEqual(interchangesFromStops(ordinary), []);
     assert.deepEqual(interchangesFromStops(null), []);
