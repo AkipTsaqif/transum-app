@@ -72,12 +72,150 @@ export function walkingConnections(
   const claimed = new Set(
     clicked.routes.map((route) => routeKey(clicked.mode, route.route_id)),
   );
+  const inRange = candidates
+    .filter(
+      (candidate) =>
+        candidate.distance > SAME_PLACE_M && candidate.distance <= radiusM,
+    )
+    .sort((a, b) => a.distance - b.distance);
+
+  // One row per PLACE, not per operator record: two operators mapping the
+  // same physical stop produce two stations a few metres apart, which used to
+  // show as two identical rows. Routes keep their mode while merging, because
+  // the same id in two systems is two different services.
+  const groups: {
+    name: string;
+    lat: number;
+    lon: number;
+    distance: number;
+    mode: TransitMode;
+    routes: { mode: TransitMode; route: RouteSummary }[];
+  }[] = [];
+  for (const candidate of inRange) {
+    const group = groups.find(
+      (g) => g.name === candidate.name && metresWithin(g, candidate),
+    );
+    const entries = candidate.routes.map((route) => ({
+      mode: candidate.mode,
+      route,
+    }));
+    if (group) {
+      group.distance = Math.min(group.distance, candidate.distance);
+      for (const entry of entries) {
+        if (
+          !group.routes.some(
+            (r) =>
+              r.mode === entry.mode && r.route.route_id === entry.route.route_id,
+          )
+        ) {
+          group.routes.push(entry);
+        }
+      }
+      continue;
+    }
+    groups.push({
+      name: candidate.name,
+      lat: candidate.lat,
+      lon: candidate.lon,
+      distance: candidate.distance,
+      mode: candidate.mode,
+      routes: entries,
+    });
+  }
+
+  // Closest place per service. Ties keep the first, so the result does not
+  // depend on how the API happened to order two equidistant stops.
+  const closest = new Map<string, number>();
+  for (const group of groups) {
+    for (const { mode, route } of group.routes) {
+      const key = routeKey(mode, route.route_id);
+      const best = closest.get(key);
+      if (best === undefined || group.distance < best) {
+        closest.set(key, group.distance);
+      }
+    }
+  }
+
+  const connections: NearbyConnection[] = [];
+  for (const group of groups) {
+    const kept = group.routes.filter(({ mode, route }) => {
+      const key = routeKey(mode, route.route_id);
+      return !claimed.has(key) && closest.get(key) === group.distance;
+    });
+    if (!kept.length) continue;
+    connections.push({
+      mode: group.mode,
+      name: group.name,
+      lat: group.lat,
+      lon: group.lon,
+      distance: group.distance,
+      routes: kept.map((entry) => entry.route),
+    });
+  }
+  return connections.sort((a, b) => a.distance - b.distance);
+}
+
+/** Same physical place: same name and within `SAME_PLACE_M` of each other. */
+const metresWithin = (
+  a: { lat: number; lon: number },
+  b: { lat: number; lon: number },
+) =>
+  Math.hypot(
+    (a.lon - b.lon) * 111_320 * Math.cos(((a.lat + b.lat) * Math.PI) / 360),
+    (a.lat - b.lat) * 110_540,
+  ) <= SAME_PLACE_M;
+
+/**
+ * "Same place", as opposed to "a short walk away".
+ *
+ * Operators rarely share a stop *object* in OSM: Terminal Leuwipanjang exists
+ * once per operator's route relations, sometimes a few metres apart. Below
+ * this radius the stops are one interchange, so their lines belong on the
+ * same card instead of being presented as somewhere to walk to.
+ *
+ * Kept under `WALKING_RADIUS_M` so the two lists never overlap.
+ */
+export const SAME_PLACE_M = 40;
+
+export interface SamePlaceService {
+  mode: TransitMode;
+  name: string;
+  lat: number;
+  lon: number;
+  distance: number;
+  /** Services here that the clicked stop does not already serve. */
+  routes: RouteSummary[];
+}
+
+/**
+ * Extra operator lines that call at the SAME stop as the one clicked.
+ *
+ * `walkingConnections` deliberately ignores stops under a metre away (they are
+ * the clicked stop itself) and treats everything else as a transfer. That
+ * leaves a multi-operator terminal looking like it only serves one operator,
+ * which is exactly the confusion this list fixes. Rules match the transfer
+ * list: never repeat a route the clicked stop already serves, and let the
+ * closest stop claim a route.
+ */
+export function samePlaceServices(
+  clicked: ClickedStation,
+  candidates: NearbyStation[],
+  radiusM: number = SAME_PLACE_M,
+): SamePlaceService[] {
+  const claimed = new Set(
+    clicked.routes.map((route) => routeKey(clicked.mode, route.route_id)),
+  );
   const inRange = candidates.filter(
-    (candidate) => candidate.distance > 1 && candidate.distance <= radiusM,
+    (candidate) =>
+      candidate.distance <= radiusM &&
+      // The clicked stop's own record, not a neighbouring platform.
+      !(
+        candidate.mode === clicked.mode &&
+        candidate.name === clicked.name &&
+        candidate.distance <= 1
+      ),
   );
 
-  // Closest provider per route. Ties keep the first, so the result does not
-  // depend on how the API happened to order two equidistant stops.
   const closest = new Map<string, number>();
   for (const candidate of inRange) {
     for (const route of candidate.routes) {
@@ -89,14 +227,14 @@ export function walkingConnections(
     }
   }
 
-  const connections: NearbyConnection[] = [];
+  const services: SamePlaceService[] = [];
   for (const candidate of inRange) {
     const routes = candidate.routes.filter((route) => {
       const key = routeKey(candidate.mode, route.route_id);
       return !claimed.has(key) && closest.get(key) === candidate.distance;
     });
     if (!routes.length) continue;
-    connections.push({
+    services.push({
       mode: candidate.mode,
       name: candidate.name,
       lat: candidate.lat,
@@ -105,7 +243,24 @@ export function walkingConnections(
       routes,
     });
   }
-  return connections.sort((a, b) => a.distance - b.distance);
+  return services.sort(
+    (a, b) => a.distance - b.distance || a.name.localeCompare(b.name),
+  );
+}
+
+/**
+ * Split a connection's routes into the badges that fit and the rest.
+ *
+ * A row shows a couple of badges so the list stays scannable, but a stop can
+ * contribute more services than that (Leuwipanjang brings several). The hidden
+ * ones are kept intact for the expandable detail, never silently dropped.
+ */
+export function connectionRoutes(
+  routes: RouteSummary[],
+  limit: number,
+): { shown: RouteSummary[]; hidden: RouteSummary[] } {
+  const safe = Math.max(0, Math.trunc(limit));
+  return { shown: routes.slice(0, safe), hidden: routes.slice(safe) };
 }
 
 /** [lon, lat] ring approximating a ground-radius circle around a point. */

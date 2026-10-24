@@ -3,7 +3,10 @@ import test from "node:test";
 import type { TransitMode } from "@/lib/gtfs";
 import type { RouteSummary } from "./types/gtfs";
 import {
+  connectionRoutes,
   connectionsAnchor,
+  samePlaceServices,
+  SAME_PLACE_M,
   walkingConnections,
   walkRadiusRing,
   WALKING_RADIUS_M,
@@ -235,4 +238,60 @@ test("the card avoids the side holding the dots, even the near ones", () => {
     covers[anchor](bearing(c)),
   ).length;
   assert.equal(covered, 0, `anchor ${anchor} covers ${covered} dots`);
+});
+
+test("badges that do not fit are kept for the expandable detail", () => {
+  const routes = [route("K1"), route("K2"), route("K4"), route("F2")];
+  assert.deepEqual(connectionRoutes(routes, 2), {
+    shown: [routes[0], routes[1]],
+    hidden: [routes[2], routes[3]],
+  });
+  // A missing badge is not a missing route: the count and order survive.
+  assert.equal(connectionRoutes(routes, 2).hidden.map((r) => r.route_id).join(), "K4,F2");
+  assert.deepEqual(connectionRoutes(routes, 9).hidden, []);
+  assert.deepEqual(connectionRoutes(routes, 0).shown, []);
+  assert.equal(connectionRoutes([], 2).hidden.length, 0);
+});
+
+test("same-place operators are merged into one stop card, not a walk", () => {
+  // Leuwipanjang as OSM maps it: MJT, DAMRI and TMB each own a stop object.
+  const clicked = {
+    mode: "bdg-mjt" as const,
+    name: "Terminal Leuwipanjang",
+    lat: -6.94586,
+    lon: 107.59326,
+    routes: [route("1"), route("4"), route("6")],
+  };
+  const at = (mode: TransitMode, name: string, d: number, ids: string[]) => ({
+    mode,
+    name,
+    lat: clicked.lat + d / 110_540,
+    lon: clicked.lon,
+    distance: d,
+    routes: ids.map(route),
+  });
+  const services = samePlaceServices(clicked, [
+    at("bdg-mjt", "Terminal Leuwipanjang", 0, ["1", "4", "6"]), // itself
+    at("bdg-damri", "Terminal Leuwipanjang", 3, ["2", "11"]),
+    at("bdg-tmb", "Terminal Leuwipanjang", 12, ["K4"]),
+    at("bdg-damri", "Leuwipanjang Soekarno Hatta", 110, ["6A"]),
+  ]);
+  assert.deepEqual(
+    services.map((s) => [s.mode, s.routes.map((r) => r.route_id)]),
+    [
+      ["bdg-damri", ["2", "11"]],
+      ["bdg-tmb", ["K4"]],
+    ],
+  );
+  // A walk away is not "the same place".
+  assert.equal(SAME_PLACE_M, 40);
+  assert.ok(services.every((s) => s.distance <= SAME_PLACE_M));
+});
+
+test("a same-place stop that only repeats the clicked routes is hidden", () => {
+  const clicked = { mode: "krl" as const, name: "Sudirman", lat: -6.2, lon: 106.82, routes: [route("C")] };
+  const services = samePlaceServices(clicked, [
+    { mode: "krl", name: "Sudirman", lat: -6.20001, lon: 106.82, distance: 1.2, routes: [route("C")] },
+  ]);
+  assert.deepEqual(services, []);
 });

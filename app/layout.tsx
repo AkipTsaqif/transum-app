@@ -31,9 +31,9 @@ const defaultUrl = process.env.VERCEL_URL
 
 export const metadata = {
     metadataBase: new URL(defaultUrl),
-    title: "Transum App — Peta Rute Transjakarta",
+    title: "Transum App — Peta Transportasi Jakarta dan Bandung",
     description:
-        "Jelajahi rute dan halte Transjakarta di peta. Data GTFS resmi dari PT Transportasi Jakarta.",
+        "Jelajahi rute dan halte transportasi Jakarta dan Bandung di peta. Data dari GTFS Transjakarta dan OpenStreetMap.",
 };
 
 export default function RootLayout({

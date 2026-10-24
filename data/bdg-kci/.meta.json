@@ -1,0 +1,16 @@
+{
+  "source": "OpenStreetMap relation full API",
+  "attribution": "© OpenStreetMap contributors",
+  "mode": "bdg-kci",
+  "relations": [
+    17077466,
+    17077467,
+    15534571,
+    17545520,
+    17549847,
+    17549848,
+    17549850
+  ],
+  "syncedAt": "2026-10-24T00:23:12.275Z",
+  "scope": "Validated operating Bandung rail, Metro Jabar Trans, Trans Metro Bandung, Bus Kota DAMRI and angkot trayek from OpenStreetMap; no timetable or headway data."
+}

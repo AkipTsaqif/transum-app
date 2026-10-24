@@ -18,9 +18,23 @@ import type {
  *   krl   data/krl/   KRL Commuter Line, from OpenStreetMap (sync:krl)
  *   mrt   data/mrt/   MRT Jakarta, from OpenStreetMap (sync:mrt)
  *   lrt   data/lrt/   LRT Jakarta (Jakpro), from OpenStreetMap (sync:lrt)
- *   lrtj  data/lrtj/  LRT Jabodebek (PT KAI), from OpenStreetMap (sync:lrt)
+ *   lrtj     data/lrtj/     LRT Jabodebek (PT KAI), from OpenStreetMap (sync:lrt)
+ *   bdg-kci  data/bdg-kci/  KAI Commuter Bandung (sync:bandung)
+ *   bdg-kai  data/bdg-kai/  Whoosh feeder, PT KAI (sync:bandung)
+ *   bdg-mjt  data/bdg-mjt/  Metro Jabar Trans (sync:bandung)
  */
-export type TransitMode = "gtfs" | "krl" | "mrt" | "lrt" | "lrtj";
+export type TransitMode =
+  | "gtfs"
+  | "krl"
+  | "mrt"
+  | "lrt"
+  | "lrtj"
+  | "bdg-kci"
+  | "bdg-kai"
+  | "bdg-mjt"
+  | "bdg-tmb"
+  | "bdg-damri"
+  | "bdg-angkot";
 
 /** Every mode, for `generateStaticParams`. */
 export const TRANSIT_MODES: TransitMode[] = [
@@ -29,11 +43,17 @@ export const TRANSIT_MODES: TransitMode[] = [
   "mrt",
   "lrt",
   "lrtj",
+  "bdg-kci",
+  "bdg-kai",
+  "bdg-mjt",
+  "bdg-tmb",
+  "bdg-damri",
+  "bdg-angkot",
 ];
 
 /** Anything unrecognised falls back to the default rather than erroring. */
 export const parseMode = (v: string | null | undefined): TransitMode =>
-  v === "krl" || v === "mrt" || v === "lrt" || v === "lrtj" ? v : "gtfs";
+  TRANSIT_MODES.includes(v as TransitMode) ? (v as TransitMode) : "gtfs";
 
 const dataDir = (mode: TransitMode) => path.join(process.cwd(), "data", mode);
 
@@ -265,18 +285,16 @@ export async function searchStations(
 }
 
 /**
- * Stations of EVERY dataset within a straight-line radius of a point, each
- * tagged with its mode and its route summaries.
- *
- * Walking transfers are inherently cross-system -- the whole point is to see
- * the Transjakarta stop next to the KRL station -- so this deliberately reads
- * all five datasets rather than one mode. ~6,600 stations take a fraction of a
- * millisecond to scan; the per-mode indexes are already memoised.
+ * Stations of the requested city's modes within a straight-line radius, each
+ * tagged with its mode and its route summaries. The optional mode list lets
+ * walking transfers cross systems but never accidentally cross cities.
+ * Per-mode indexes are memoised.
  */
 export async function getNearbyStations(
   lat: number,
   lon: number,
   radiusM: number,
+  modes: readonly TransitMode[] = TRANSIT_MODES,
 ): Promise<
   {
     mode: TransitMode;
@@ -296,7 +314,7 @@ export async function getNearbyStations(
     routes: RouteSummary[];
   }[] = [];
 
-  for (const mode of TRANSIT_MODES) {
+  for (const mode of modes) {
     const [stations, routes] = await Promise.all([
       getStationIndex(mode),
       getRouteIndex(mode),
