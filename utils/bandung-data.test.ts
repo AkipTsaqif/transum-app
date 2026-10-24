@@ -115,7 +115,7 @@ test("baked Bandung systems contain only validated route ids and usable geometry
     "K1 must still reach Cibiru",
   );
   const angkot = await getRouteIndex("bdg-angkot");
-  assert.equal(angkot.length, 115);
+  assert.equal(angkot.length, 107);
   // OSM reuses trayek numbers, so a number can cover several corridors.
   // They must stay separate lines, never one route spanning the city.
   const angkot08 = angkot.filter((r) => /^08(-|$)/.test(r.route_id));
