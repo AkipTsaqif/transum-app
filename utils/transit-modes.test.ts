@@ -15,8 +15,11 @@ import {
 test("MRT mode reads its own stations and routes without leaking KRL or bus data", async () => {
   assert.ok(TRANSIT_MODES.includes("mrt"));
   assert.equal(parseMode("mrt"), "mrt");
-  assert.equal(parseMode("invalid"), "gtfs");
-  assert.equal(parseMode(null), "gtfs");
+  // An unknown mode used to resolve to "gtfs", which served Transjakarta data
+  // under a URL that named a different mode. It is now a missing dataset.
+  assert.equal(parseMode("invalid"), null);
+  assert.equal(parseMode(null), null);
+  assert.equal(parseMode("sby-medan"), null);
   const routes = await getRouteIndex("mrt");
   assert.deepEqual(
     routes.map((r) => r.route_id),

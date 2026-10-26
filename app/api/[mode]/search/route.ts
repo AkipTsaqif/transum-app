@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { parseMode, searchStations } from "@/lib/gtfs";
 
+/** Unknown modes 404 at the router, not at runtime. */
+export const dynamicParams = false;
+
 /**
  * GET /api/gtfs/search?q=
  *
@@ -15,6 +18,11 @@ export async function GET(
     { params }: { params: Promise<{ mode: string }> }
 ) {
     const mode = parseMode((await params).mode);
+    // An unknown /api/<mode>/* path is a 404, never another city's data.
+    if (!mode) {
+        return NextResponse.json({ error: "Unknown mode" }, { status: 404 });
+    }
+
     const q = new URL(request.url).searchParams.get("q")?.trim() ?? "";
 
     // Two characters is the point where results stop being the whole dataset.

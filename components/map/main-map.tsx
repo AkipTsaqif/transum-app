@@ -40,7 +40,7 @@ import {
 } from "@/utils/interchange";
 import { AIRPORT_LINE_OFFSET_PX } from "@/utils/krl-line-offset";
 import { allStopsLabelFilter, overviewLinePaint } from "@/utils/all-modes";
-import { BUS_MODES, isBusMode } from "@/utils/cities";
+import { BUS_MODES, REGIONAL_RAIL_ZOOM, isBusMode } from "@/utils/cities";
 import {
   airportManggaraiDisplayPoint,
   airportTerminalScreenPoint,
@@ -138,6 +138,12 @@ const ATTRIBUTION: Record<TransitMode, string> = {
     'Data rute Bus Kota DAMRI \u00a9 <a href="https://www.openstreetmap.org/copyright">kontributor OpenStreetMap</a> \u00b7 diolah',
   "bdg-angkot":
     'Data rute angkot © <a href="https://www.openstreetmap.org/copyright">kontributor OpenStreetMap</a> · diolah',
+  "sby-kai":
+    'Data rute KAI Commuter Area VIII © <a href="https://www.openstreetmap.org/copyright">kontributor OpenStreetMap</a> · diolah',
+  "sby-suroboyo":
+    'Data rute Suroboyo Bus © <a href="https://www.openstreetmap.org/copyright">kontributor OpenStreetMap</a> · diolah',
+  "sby-transjatim":
+    'Data rute Trans Jatim © <a href="https://www.openstreetmap.org/copyright">kontributor OpenStreetMap</a> · diolah',
 };
 
 /**
@@ -706,7 +712,10 @@ const MainMapComponent = ({
   // and keep labels for when the user is actually zoomed in.
   // Fitting the whole KRL network (including Bogor) can settle around z9.
   // Keep Transjakarta's existing z10 route-pin gate unchanged.
-  const zoomThreshold = !isBusMode(mode) ? 9 : 10;
+  // A regional rail network (Surabaya's Area VIII reaches Blitar) fits below
+  // z9, so it carries its own lower floor instead of the city-sized one.
+  const regionalFloor = REGIONAL_RAIL_ZOOM[mode];
+  const zoomThreshold = regionalFloor ?? (!isBusMode(mode) ? 9 : 10);
   // Auto-fit frames a trunk anywhere from z11.9 to z15.8 depending on how
   // long it is, so a high fixed gate hid labels on most routes right after
   // the camera settled. Collision placement already drops labels that will
@@ -714,7 +723,7 @@ const MainMapComponent = ({
   // KRL and MRT have small station sets, so their names can be read at
   // the city-wide zoom a route fit settles on. Transjakarta's 6,437 names stay
   // gated: at this zoom they are an unreadable, expensive smear.
-  const labelThreshold = !isBusMode(mode) ? 9 : 11;
+  const labelThreshold = regionalFloor ?? (!isBusMode(mode) ? 9 : 11);
   const nearbyThreshold = 55;
   /**
    * Where the city-wide station dots begin. Transjakarta has 6,437 stops,

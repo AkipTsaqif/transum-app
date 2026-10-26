@@ -10,12 +10,20 @@ import { getStationDetail, parseMode } from "@/lib/gtfs";
  */
 export const revalidate = 86400;
 
+/** Unknown modes 404 at the router, not at runtime. */
+export const dynamicParams = false;
+
 export async function GET(
     _request: Request,
     { params }: { params: Promise<{ mode: string; id: string }> }
 ) {
     const { id, mode: rawMode } = await params;
     const mode = parseMode(rawMode);
+    // An unknown /api/<mode>/* path is a 404, never another city's data.
+    if (!mode) {
+        return NextResponse.json({ error: "Unknown mode" }, { status: 404 });
+    }
+
 
     try {
         const station = await getStationDetail(decodeURIComponent(id), mode);

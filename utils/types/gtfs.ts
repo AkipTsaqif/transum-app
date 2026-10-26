@@ -15,6 +15,17 @@ export interface RouteSummary {
     /** Always a valid 6-digit hex (no `#`). Sync substitutes a grey fallback. */
     route_color: string;
     route_text_color: string;
+    /**
+     * OSM service hours copied verbatim from the route relation, where the
+     * source has them. Never a frequency: this app draws no timetable.
+     */
+    openingHours?: string;
+    /**
+     * Some bus relations carry almost no stop members (Suroboyo 2-5 have 1-5
+     * platforms against 50-92 ways). The geometry is real, the stop list is
+     * not, so the card says so instead of drawing a two-stop diagram.
+     */
+    stopsPartial?: boolean;
 }
 
 export interface RouteStop {
@@ -88,6 +99,10 @@ export interface RouteDetail {
     route_short_name: string;
     route_long_name: string;
     route_color: string;
+    /** OSM service hours, when the source relation carries them. */
+    openingHours?: string;
+    /** Geometry is real but the stop list is not: see RouteSummary. */
+    stopsPartial?: boolean;
     stops: RouteStop[];
     variants: RouteVariant[];
     /** shape_id -> [lon, lat][]. The client assembles the lines it needs. */

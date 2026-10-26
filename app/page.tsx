@@ -29,10 +29,19 @@ import type { FeatureCollection } from "geojson";
 import { DualLine, SingleLine } from "@/components/route/route-line-diagram";
 import { dualDiagramFor, singleDiagramFor } from "@/utils/line-diagram";
 import { railLineOffset } from "@/utils/line-offset";
-import { CITY_MODES, cityForMode, cityModes, isBusMode } from "@/utils/cities";
+import {
+  CITIES,
+  CITY_LABELS,
+  cityForMode,
+  cityForView,
+  cityView,
+  isBusMode,
+  isCityView,
+} from "@/utils/cities";
 import {
   dataModeFor,
   groupRoutesByMode,
+  modesForView,
   mergeOverviews,
   mergeStopLayers,
   parseView,
@@ -79,6 +88,9 @@ const MODES: { value: TransitMode; label: string; ready: boolean }[] = [
   { value: "bdg-tmb", label: "Trans Metro Bandung", ready: true },
   { value: "bdg-damri", label: "Bus Kota DAMRI", ready: true },
   { value: "bdg-angkot", label: "Angkot Bandung", ready: true },
+  { value: "sby-kai", label: "KAI Commuter Surabaya (Area VIII)", ready: true },
+  { value: "sby-suroboyo", label: "Suroboyo Bus", ready: true },
+  { value: "sby-transjatim", label: "Trans Jatim (provinsi)", ready: true },
 ];
 /**
  * Baked data is served with an hour-long browser cache in production, which is
@@ -110,18 +122,16 @@ interface StationOperator {
 const useCoarsePointer = () => useMediaQuery("(pointer: coarse)");
 
 const modeLabel = (m: View) =>
-  m === "all"
-    ? "Semua Moda · Jakarta"
-    : m === "bandung-all"
-      ? "Semua Moda · Bandung"
-      : (MODES.find((x) => x.value === m)?.label ?? m);
+  isCityView(m)
+    ? `Semua Moda · ${CITY_LABELS[cityForView(m)]}`
+    : (MODES.find((x) => x.value === m)?.label ?? m);
 
 export default function Index() {
   // What the picker shows: one dataset, or "all" of them together.
   // Semua Moda is the landing view: one map with every network on it, and
   // the picker can narrow to a single system from there.
-  const [view, setView] = useState<View>("all");
-  const isAll = view === "all" || view === "bandung-all";
+  const [view, setView] = useState<View>(cityView("jakarta"));
+  const isAll = isCityView(view);
   // A request number, not a boolean: each deliberate mode switch asks the map
   // to fit the new network exactly once, after its overview has loaded.
   // Starts at 1 because the FIRST load needs a fit too -- the fallback
@@ -305,12 +315,7 @@ export default function Index() {
 
   /** The datasets the current view draws from: one, or all of them. */
   const viewModes: readonly TransitMode[] = useMemo(
-    () =>
-      view === "all"
-        ? CITY_MODES.jakarta
-        : view === "bandung-all"
-          ? CITY_MODES.bandung
-          : [view as TransitMode],
+    () => modesForView(view),
     [view],
   );
 
@@ -1225,32 +1230,26 @@ export default function Index() {
               <SelectValue placeholder="Pilih moda" />
             </SelectTrigger>
             <SelectContent>
-              <SelectGroup>
-                <SelectLabel className="pl-4">Jakarta</SelectLabel>
-                {/* Every dataset on one map: rail lines bold, the bus
-                    network faint underneath. First in the group because it
-                    covers everything under it. */}
-                <SelectItem value="all">Semua Moda</SelectItem>
-                {MODES.filter((m) =>
-                  cityModes("jakarta").includes(m.value),
-                ).map((m) => (
-                  <SelectItem key={m.value} value={m.value} disabled={!m.ready}>
-                    {m.label}
-                    {!m.ready && " (segera)"}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-              <SelectGroup>
-                <SelectLabel className="pl-4">Bandung</SelectLabel>
-                <SelectItem value="bandung-all">Semua Moda</SelectItem>
-                {MODES.filter((m) =>
-                  cityModes("bandung").includes(m.value),
-                ).map((m) => (
-                  <SelectItem key={m.value} value={m.value}>
-                    {m.label}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
+              {CITIES.map((city) => (
+                <SelectGroup key={city}>
+                  <SelectLabel className="pl-4">
+                    {CITY_LABELS[city]}
+                  </SelectLabel>
+                  <SelectItem value={cityView(city)}>Semua Moda</SelectItem>
+                  {MODES.filter((m) => modesForView(cityView(city)).includes(m.value)).map(
+                    (m) => (
+                      <SelectItem
+                        key={m.value}
+                        value={m.value}
+                        disabled={!m.ready}
+                      >
+                        {m.label}
+                        {!m.ready && " (segera)"}
+                      </SelectItem>
+                    ),
+                  )}
+                </SelectGroup>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -1522,7 +1521,7 @@ export default function Index() {
           // interchanges, the airport marker); `allModes` switches the overview
           // to bus-faint / rail-bold styling.
           mode={
-            isAll ? (view === "all" ? "krl" : "bdg-kci") : (view as TransitMode)
+            isAll ? (viewModes[0] ?? "krl") : (view as TransitMode)
           }
           allModes={isAll}
           forcePins={previewEnds.length > 0}
@@ -1878,7 +1877,7 @@ function VariantPanel({
           <p className="px-3 pt-1 pb-2.5 text-[10px] leading-snug text-white/35">
             {mode === "krl" && detail.route_id === "C"
               ? "Pola dari OpenStreetMap; tidak ada jadwal kereta dalam data ini."
-              : mode?.startsWith("bdg-")
+              : mode && mode !== "gtfs"
                 ? "Rute dari OpenStreetMap; tidak ada jadwal atau frekuensi dalam data ini."
                 : "Hanya tampil bila dipilih. GTFS tidak mencatat pengalihan yang sedang berlaku."}
           </p>
@@ -1894,9 +1893,7 @@ function VariantPanel({
         >
           <MapPin size={13} className="shrink-0 opacity-60" />
           <span className="min-w-0 flex-1 text-[10px] font-bold tracking-wide text-white/40 uppercase">
-            {mode === "krl" || mode === "bdg-kci" || mode === "bdg-kai"
-              ? "Pemberhentian"
-              : "Halte"}
+            {mode && !isBusMode(mode) ? "Pemberhentian" : "Halte"}
             {stopCount > 0 ? " \u00b7 " + stopCount : ""}
           </span>
           <ChevronRight
@@ -1945,8 +1942,18 @@ function VariantPanel({
                 {shown.via ? "via " + shown.via : shown.headsign}
               </div>
             )}
+            {detail.openingHours && (
+              <div className="px-3 pb-2 text-[10px] text-white/40">
+                Jam operasional (OSM): {detail.openingHours}
+              </div>
+            )}
 
-            {dual ? (
+            {detail.stopsPartial ? (
+              <p className="mx-3 mb-3 rounded bg-amber-400/10 px-2 py-1.5 text-[10px] leading-snug text-amber-200/90">
+                Halte koridor ini belum lengkap di OpenStreetMap, jadi diagram
+                halte tidak ditampilkan. Garis rutenya tetap asli.
+              </p>
+            ) : dual ? (
               <DualLine
                 diagram={dual}
                 color={color}

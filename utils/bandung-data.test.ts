@@ -44,7 +44,7 @@ test("the city registry is the only place a dataset is assigned to a city", () =
   assert.deepEqual(CITIES, Object.keys(CITY_MODES));
   assert.equal(isCity("jakarta"), true);
   assert.equal(isCity("bandung"), true);
-  assert.equal(isCity("surabaya"), false);
+  assert.equal(isCity("medan"), false);
   assert.equal(isCity(null), false);
   // Unknown modes are a programming error, not a silent fallback to Jakarta.
   assert.throws(() => cityForMode("surabaya" as never));

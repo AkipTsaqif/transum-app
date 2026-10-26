@@ -1,0 +1,87 @@
+{
+  "source": "OpenStreetMap relation full API",
+  "attribution": "© OpenStreetMap contributors",
+  "userAgent": "transum-app-surabaya-sync/1.0",
+  "osmTimestamp": "2026-09-06T22:26:20Z",
+  "osmTimestamps": {
+    "17532039": "2026-03-25T19:14:33Z",
+    "18068767": "2026-09-06T22:26:20Z",
+    "18068768": "2026-09-06T22:26:20Z",
+    "18082351": "2026-05-20T13:24:58Z",
+    "18082352": "2024-11-19T17:29:33Z",
+    "18099420": "2026-05-20T13:24:58Z",
+    "18099421": "2026-04-14T06:20:28Z",
+    "18306828": "2026-04-28T09:52:37Z",
+    "18306829": "2026-04-23T07:29:09Z",
+    "18308008": "2026-04-20T06:52:44Z",
+    "18308009": "2026-05-20T13:24:58Z",
+    "18312633": "2026-05-20T13:24:58Z",
+    "18329868": "2026-05-20T13:24:58Z",
+    "18329869": "2026-04-17T09:00:41Z"
+  },
+  "syncedAt": "2026-10-24T04:27:21.527Z",
+  "mode": "sby-kai",
+  "relations": [
+    18308008,
+    18308009,
+    18306828,
+    18306829,
+    18068767,
+    18068768,
+    18082351,
+    18082352,
+    18099420,
+    18099421,
+    17532039,
+    18312633,
+    18329868,
+    18329869
+  ],
+  "routes": [
+    "A",
+    "B",
+    "D",
+    "J",
+    "P",
+    "SI",
+    "SP"
+  ],
+  "routeCount": 7,
+  "variantCount": 14,
+  "stationCount": 64,
+  "displayPalette": true,
+  "paletteNote": "Colours are a display palette, not official operator colours.",
+  "scope": [
+    "KAI Commuter Area VIII Arjonegoro",
+    "KAI Commuter Area VIII Blorasura",
+    "KAI Commuter Area VIII Dhoho",
+    "KAI Commuter Area VIII Jenggala",
+    "KAI Commuter Area VIII Penataran",
+    "KAI Commuter Area VIII Sindro (unverified service)",
+    "KAI Commuter Area VIII Supas"
+  ],
+  "excludedRelations": [
+    {
+      "relation": 18320740,
+      "ref": "T",
+      "reason": "Tumapel ceased operating 2025-01-31"
+    },
+    {
+      "relation": 18320741,
+      "ref": "T",
+      "reason": "Tumapel ceased operating 2025-01-31"
+    }
+  ],
+  "unverifiedRelations": [
+    {
+      "relation": 17532039,
+      "ref": "SI",
+      "reason": "Sindro is absent from KAI Commuter's published six-service list"
+    },
+    {
+      "relation": 18312633,
+      "ref": "SI",
+      "reason": "Sindro is absent from KAI Commuter's published six-service list"
+    }
+  ]
+}

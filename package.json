@@ -10,6 +10,7 @@
     "sync:mrt": "tsx scripts/sync-mrt.ts",
     "sync:lrt": "tsx scripts/sync-lrt.ts",
     "sync:bandung": "tsx scripts/sync-bandung.ts",
+    "sync:surabaya": "tsx scripts/sync-surabaya.ts",
     "copy:maplibre": "node scripts/copy-maplibre-worker.mjs",
     "build:glyphs": "node scripts/build-glyphs.mjs",
     "build:styles": "node scripts/build-styles.mjs",

@@ -11,6 +11,7 @@ import {
   mergeOverviews,
   allStopsLabelFilter,
   mergeStopLayers,
+  modesForView,
   overviewLinePaint,
   parseView,
   resolveStationMode,
@@ -18,6 +19,15 @@ import {
   splitRouteKey,
   type ModeRoute,
 } from "./all-modes";
+import {
+  BUS_MODES,
+  CITIES,
+  CITY_LABELS,
+  REGIONAL_RAIL_ZOOM,
+  CITY_MODES,
+  cityForView,
+  cityView,
+} from "./cities";
 
 const route = (id: string): RouteSummary => ({
   route_id: id,
@@ -61,19 +71,21 @@ test("route keys carry the mode so equal ids from two datasets never clash", () 
 });
 
 test("all-modes view lists rail before bus, each mode once", () => {
-  assert.deepEqual(ALL_MODE_ORDER, [
-    "krl",
-    "mrt",
-    "lrt",
-    "lrtj",
-    "gtfs",
-    "bdg-kci",
-    "bdg-kai",
-    "bdg-mjt",
-    "bdg-tmb",
-    "bdg-damri",
-    "bdg-angkot",
-  ]);
+  // Derived from the registry, so a new city joins the order automatically.
+  const expected = CITIES.flatMap((city) => [...CITY_MODES[city]]);
+  assert.deepEqual(ALL_MODE_ORDER, expected);
+  assert.equal(new Set(ALL_MODE_ORDER).size, ALL_MODE_ORDER.length);
+  // Each city's own list puts rail before its buses.
+  for (const city of CITIES) {
+    const modes = CITY_MODES[city];
+    const isBus = (m: TransitMode) =>
+      (BUS_MODES as readonly TransitMode[]).includes(m);
+    const firstBus = modes.findIndex(isBus);
+    const lastRail = modes.map((m) => !isBus(m)).lastIndexOf(true);
+    if (firstBus >= 0 && lastRail >= 0) {
+      assert.ok(lastRail < firstBus, `${city}: rail must precede bus`);
+    }
+  }
 });
 
 test("routes are grouped per mode in display order, keeping each mode's own order", () => {
@@ -171,10 +183,10 @@ test("the effective data mode follows the owning route in the all view", () => {
   assert.equal(dataModeFor("krl", null), "krl");
   assert.equal(dataModeFor("mrt", "mrt:M"), "mrt");
   // All view: the selected route decides; nothing selected -> no single mode.
-  assert.equal(dataModeFor("all", "lrtj:CB"), "lrtj");
-  assert.equal(dataModeFor("all", "gtfs:1"), "gtfs");
-  assert.equal(dataModeFor("all", null), null);
-  assert.equal(dataModeFor("all", "garbage"), null);
+  assert.equal(dataModeFor("jakarta-all", "lrtj:CB"), "lrtj");
+  assert.equal(dataModeFor("jakarta-all", "gtfs:1"), "gtfs");
+  assert.equal(dataModeFor("jakarta-all", null), null);
+  assert.equal(dataModeFor("jakarta-all", "garbage"), null);
 });
 
 test("view parsing accepts every dataset mode plus all, and nothing else", () => {
@@ -184,7 +196,7 @@ test("view parsing accepts every dataset mode plus all, and nothing else", () =>
     "mrt",
     "lrt",
     "lrtj",
-    "all",
+    "jakarta-all",
     "bdg-kci",
     "bdg-kai",
     "bdg-mjt",
@@ -197,6 +209,8 @@ test("view parsing accepts every dataset mode plus all, and nothing else", () =>
   }
   assert.equal(parseView("bus"), null);
   assert.equal(parseView(""), null);
+  // `all` predates the city registry and meant "all of Jakarta".
+  assert.equal(parseView("all"), "jakarta-all");
 });
 
 test("overview paint is valid MapLibre style and keeps zoom at the top level", () => {
@@ -269,20 +283,27 @@ test("all-mode station names start at z12, bus stop names later", () => {
     validateStyleMin(style as never).map((e) => e.message),
     [],
   );
-  // Rail station names are readable from z12; the 6,437 bus names wait for z14.
+  // Rail station names are readable from z12; every bus name waits for z14.
+  const buses = ["literal", [...BUS_MODES]];
+  const regional = Object.entries(REGIONAL_RAIL_ZOOM);
   assert.deepEqual(filter, [
     "any",
     [
       "all",
-      ["!", ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt", "bdg-tmb", "bdg-damri", "bdg-angkot"]]]],
+      ["!", ["in", ["get", "mode"], buses]],
+      ["!", ["in", ["get", "mode"], ["literal", regional.map(([m]) => m)]]],
       [">=", ["zoom"], 12],
     ],
-    [
+    ...regional.map(([m, floor]) => [
       "all",
-      ["in", ["get", "mode"], ["literal", ["gtfs", "bdg-mjt", "bdg-tmb", "bdg-damri", "bdg-angkot"]]],
-      [">=", ["zoom"], 14],
-    ],
+      ["==", ["get", "mode"], m],
+      [">=", ["zoom"], floor],
+    ]),
+    ["all", ["in", ["get", "mode"], buses], [">=", ["zoom"], 14]],
   ]);
+  // Only Surabaya's regional rail is exempt; Jakarta/Bandung rail keeps z12.
+  assert.deepEqual(Object.keys(REGIONAL_RAIL_ZOOM), ["sby-kai"]);
+  assert.ok(REGIONAL_RAIL_ZOOM["sby-kai"]! < 9, "must clear the 8.97 fit");
 });
 
 test("a clicked station resolves to the dataset it lives in", () => {
@@ -347,6 +368,20 @@ test("a clicked station resolves to the dataset it lives in", () => {
     null,
   );
   assert.equal(resolveStationMode(undefined, null, [], near), null);
+});
+
+test("every city gets its all view from the registry, not from a literal", () => {
+  // Adding a city must not require touching this file or the picker.
+  for (const city of CITIES) {
+    const view = cityView(city);
+    assert.equal(parseView(view), view);
+    assert.deepEqual(modesForView(view), [...CITY_MODES[city]]);
+    assert.equal(cityForView(view), city);
+    assert.ok(CITY_LABELS[city], `${city} needs a display label`);
+  }
+  // A city-shaped name that is not registered must not parse.
+  assert.equal(parseView("medan-all"), null);
+  assert.deepEqual(modesForView("krl"), ["krl"]);
 });
 
 test("Bandung has its own all view, separate from Jakarta", () => {

@@ -22,6 +22,9 @@ import type {
  *   bdg-kci  data/bdg-kci/  KAI Commuter Bandung (sync:bandung)
  *   bdg-kai  data/bdg-kai/  Whoosh feeder, PT KAI (sync:bandung)
  *   bdg-mjt  data/bdg-mjt/  Metro Jabar Trans (sync:bandung)
+ *   sby-kai        data/sby-kai/        KAI Commuter Area VIII (sync:surabaya)
+ *   sby-suroboyo   data/sby-suroboyo/   Suroboyo Bus (sync:surabaya)
+ *   sby-transjatim data/sby-transjatim/ Trans Jatim (sync:surabaya)
  */
 export type TransitMode =
   | "gtfs"
@@ -34,7 +37,10 @@ export type TransitMode =
   | "bdg-mjt"
   | "bdg-tmb"
   | "bdg-damri"
-  | "bdg-angkot";
+  | "bdg-angkot"
+  | "sby-kai"
+  | "sby-suroboyo"
+  | "sby-transjatim";
 
 /** Every mode, for `generateStaticParams`. */
 export const TRANSIT_MODES: TransitMode[] = [
@@ -49,11 +55,23 @@ export const TRANSIT_MODES: TransitMode[] = [
   "bdg-tmb",
   "bdg-damri",
   "bdg-angkot",
+  "sby-kai",
+  "sby-suroboyo",
+  "sby-transjatim",
 ];
 
-/** Anything unrecognised falls back to the default rather than erroring. */
-export const parseMode = (v: string | null | undefined): TransitMode =>
-  TRANSIT_MODES.includes(v as TransitMode) ? (v as TransitMode) : "gtfs";
+/**
+ * Resolve a mode path segment, or `null` when it is not a real dataset.
+ *
+ * This used to fall back to `"gtfs"`, which meant an unknown mode served
+ * Transjakarta data under someone else's URL. That is the worst failure mode
+ * this app has -- wrong data presented as correct -- so an unknown mode is now
+ * a missing dataset, and every route answers 404.
+ */
+export const parseMode = (
+  v: string | null | undefined,
+): TransitMode | null =>
+  TRANSIT_MODES.includes(v as TransitMode) ? (v as TransitMode) : null;
 
 const dataDir = (mode: TransitMode) => path.join(process.cwd(), "data", mode);
 

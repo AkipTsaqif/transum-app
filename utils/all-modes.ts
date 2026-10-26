@@ -1,6 +1,16 @@
 import type { Feature, FeatureCollection, Geometry, LineString } from "geojson";
 import type { TransitMode } from "@/lib/gtfs";
-import { BUS_MODES, CITY_MODES, isBusMode } from "./cities";
+import {
+  BUS_MODES,
+  CITIES,
+  REGIONAL_RAIL_ZOOM,
+  CITY_MODES,
+  cityForView,
+  cityView,
+  isBusMode,
+  isCityView,
+  type CityView,
+} from "./cities";
 import type { RouteSummary } from "./types/gtfs";
 
 /**
@@ -13,10 +23,9 @@ import type { RouteSummary } from "./types/gtfs";
  */
 
 /** Display order: rail first (few, important lines), bus last (240 routes). */
-export const ALL_MODE_ORDER: readonly TransitMode[] = [
-  ...CITY_MODES.jakarta,
-  ...CITY_MODES.bandung,
-];
+export const ALL_MODE_ORDER: readonly TransitMode[] = CITIES.flatMap(
+  (city) => CITY_MODES[city],
+);
 
 export interface ModeRoute {
   mode: TransitMode;
@@ -131,15 +140,22 @@ const sameSpot = (a: Feature<Geometry>, b: Feature<Geometry>) => {
   );
 };
 
-/** What the mode picker can show: one dataset, or every dataset together. */
-export type View = TransitMode | "all" | "bandung-all";
+/** What the mode picker can show: one dataset, or every dataset of a city. */
+export type View = TransitMode | CityView;
 
 export function parseView(value: string): View | null {
-  if (value === "all" || value === "bandung-all") return value;
+  if (isCityView(value)) return value;
+  // `all` predates the city registry and meant "all of Jakarta"; keep it
+  // working for saved state and links instead of silently selecting nothing.
+  if (value === "all") return cityView("jakarta");
   return (ALL_MODE_ORDER as readonly string[]).includes(value)
     ? (value as TransitMode)
     : null;
 }
+
+/** The datasets a view draws from, read from the city registry. */
+export const modesForView = (view: View): readonly TransitMode[] =>
+  isCityView(view) ? CITY_MODES[cityForView(view)] : [view];
 
 /**
  * Which dataset a request belongs to. A single-mode view always uses its own
@@ -150,7 +166,7 @@ export function dataModeFor(
   view: View,
   selectedKey: string | null,
 ): TransitMode | null {
-  if (view !== "all" && view !== "bandung-all") return view;
+  if (!isCityView(view)) return view;
   return selectedKey ? (splitRouteKey(selectedKey)?.mode ?? null) : null;
 }
 
@@ -216,19 +232,32 @@ export function overviewLinePaint(
  * `["zoom"]` inside a filter is evaluated at integer zoom levels, which is the
  * same granularity as a `minzoom`, so this behaves like a per-feature floor.
  */
-export const allStopsLabelFilter = (): unknown[] => [
-  "any",
-  [
-    "all",
-    ["!", ["in", ["get", "mode"], ["literal", [...BUS_MODES]]]],
-    [">=", ["zoom"], 12],
-  ],
-  [
-    "all",
-    ["in", ["get", "mode"], ["literal", [...BUS_MODES]]],
-    [">=", ["zoom"], 14],
-  ],
-];
+export const allStopsLabelFilter = (): unknown[] => {
+  const regional = Object.entries(REGIONAL_RAIL_ZOOM) as [TransitMode, number][];
+  return [
+    "any",
+    // Ordinary rail: z12, unless the mode is regional and has its own floor.
+    [
+      "all",
+      ["!", ["in", ["get", "mode"], ["literal", [...BUS_MODES]]]],
+      ...(regional.length
+        ? [["!", ["in", ["get", "mode"], ["literal", regional.map(([m]) => m)]]]]
+        : []),
+      [">=", ["zoom"], 12],
+    ],
+    // A regional rail network fits far below z12, so its names come earlier.
+    ...regional.map(([m, floor]) => [
+      "all",
+      ["==", ["get", "mode"], m],
+      [">=", ["zoom"], floor],
+    ]),
+    [
+      "all",
+      ["in", ["get", "mode"], ["literal", [...BUS_MODES]]],
+      [">=", ["zoom"], 14],
+    ],
+  ];
+};
 
 export interface StationPoint {
   name: string;

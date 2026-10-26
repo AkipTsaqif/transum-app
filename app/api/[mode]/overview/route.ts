@@ -35,6 +35,11 @@ export async function GET(
     { params }: { params: Promise<{ mode: string }> }
 ) {
     const mode = parseMode((await params).mode);
+    // An unknown /api/<mode>/* path is a 404, never another city's data.
+    if (!mode) {
+        return NextResponse.json({ error: "Unknown mode" }, { status: 404 });
+    }
+
 
     try {
         const overview = await getOverview(mode);

@@ -1,0 +1,51 @@
+{
+  "source": "OpenStreetMap relation full API",
+  "attribution": "© OpenStreetMap contributors",
+  "userAgent": "transum-app-surabaya-sync/1.0",
+  "osmTimestamp": "2026-09-15T04:01:40Z",
+  "osmTimestamps": {
+    "9788759": "2026-09-15T04:01:40Z",
+    "9788760": "2026-05-18T05:54:41Z",
+    "9788971": "2026-09-15T04:01:40Z",
+    "9788972": "2026-09-15T04:01:40Z",
+    "9789001": "2026-05-14T18:02:41Z",
+    "9789002": "2026-09-15T04:01:40Z",
+    "9969904": "2026-09-15T04:01:40Z",
+    "9969905": "2026-09-15T04:01:40Z",
+    "13130304": "2026-06-04T13:41:33Z",
+    "13130305": "2023-11-28T14:08:01Z"
+  },
+  "syncedAt": "2026-10-24T04:27:21.549Z",
+  "mode": "sby-suroboyo",
+  "relations": [
+    9788759,
+    9788760,
+    9788971,
+    9788972,
+    9789001,
+    9789002,
+    9969904,
+    9969905,
+    13130304,
+    13130305
+  ],
+  "routes": [
+    "R1",
+    "2",
+    "3",
+    "4",
+    "5"
+  ],
+  "routeCount": 5,
+  "variantCount": 10,
+  "stationCount": 51,
+  "displayPalette": true,
+  "paletteNote": "Colours are a display palette, not official operator colours.",
+  "scope": [
+    "Suroboyo Bus R1; OSM platform sequence is complete",
+    "Suroboyo Bus route 2; OSM stop data is partial",
+    "Suroboyo Bus route 3; OSM stop data is partial",
+    "Suroboyo Bus route 4; OSM stop data is partial",
+    "Suroboyo Bus route 5; OSM stop data is partial"
+  ]
+}
