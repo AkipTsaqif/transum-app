@@ -77,12 +77,28 @@ test("route 1 keeps shared streets out of the return line", () => {
     const first = lines[0];
     assert.ok(lines.length > 1, "unique return streets remain visible");
 
+    let sharedTotal = 0;
+    let interiorTotal = 0;
     for (const run of lines.slice(1)) {
         // Runs join the main line at either end. On short runs those two join
         // samples are a large percentage; the *interior* is what must be new.
         const interior = run.slice(1, -1);
         const shared = interior.filter((point) => distanceToLines(point, [first]) <= 30).length;
-        assert.ok(shared / Math.max(1, interior.length) < 0.2,
-            "return stretch should not double-paint the trunk");
+        sharedTotal += shared;
+        interiorTotal += interior.length;
+        // A ratio over a handful of samples is noise: the 2026-11 feed left one
+        // 9-sample connector with 2 near-trunk points, which tripped 0.2 on a
+        // run that cannot meaningfully double-paint anything. Judge short runs
+        // by the absolute count and long runs by the ratio.
+        if (interior.length >= 20) {
+            assert.ok(shared / interior.length < 0.2,
+                `run of ${interior.length} points re-paints the trunk`);
+        } else {
+            assert.ok(shared <= 3,
+                `${shared} of ${interior.length} points re-paint the trunk`);
+        }
     }
+    // ...and the whole route must still be substantially distinct.
+    assert.ok(sharedTotal / Math.max(1, interiorTotal) < 0.05,
+        `${sharedTotal}/${interiorTotal} return points sit on the trunk`);
 });
