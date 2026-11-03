@@ -11,19 +11,20 @@ NEXT_PUBLIC_LIVE_ENABLED=true
 NEXT_PUBLIC_LIVE_BASE_URL=http://127.0.0.1:8787
 ```
 
-Run the sidecar from the repository root, in a separate terminal. The standalone process does not auto-load Next.js `.env.local`:
+Add the sidecar settings to the same `.env.local`:
+
+```dotenv
+TJ_LIVE_ENABLED=true
+TJ_LIVE_ALLOWED_ORIGIN=http://localhost:3000
+```
+
+Run the sidecar from the repository root, in a separate terminal:
 
 ```bash
-TJ_LIVE_ENABLED=true TJ_LIVE_ALLOWED_ORIGIN=http://localhost:3000 npm run live
+npm run live   # or: bun live
 ```
 
-PowerShell equivalent:
-
-```powershell
-$env:TJ_LIVE_ENABLED='true'
-$env:TJ_LIVE_ALLOWED_ORIGIN='http://localhost:3000'
-npm run live
-```
+The sidecar loads `.env.local` then `.env` itself (`live/env.ts`); variables already set in the shell win, so `TJ_LIVE_ENABLED=false npm run live` still disables it. Its startup log prints `enabled`, `allowedOrigin` and the env files it read. `"enabled":false` means every `/live/vehicles` request answers 503.
 
 Open the map: **Transjakarta** is selected and **Bus langsung** starts on. Without a route selection, the server streams only buses inside the current map viewport; panning/zooming updates that scope after movement settles. Selecting a Transjakarta route narrows the stream to that corridor; clearing it restores the viewport scope. Jakarta's all-modes view also supports live buses; selecting another operator suspends them. The live toggle remains available without a selected route, and an explicit opt-out persists across route changes for this session.
 

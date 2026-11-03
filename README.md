@@ -38,26 +38,24 @@ The browser never talks to MQTT. The listener holds **one** upstream subscriptio
 
    The listener reads route names and colours from `data/gtfs/routes.json`. If you rebuild the feed yourself, run `npm run sync:gtfs` first.
 
-2. Create `.env.local` with the live flags (see `.env.example`):
+2. Create `.env.local` with the live flags (see `.env.example`). Both the app and the listener read this file:
 
    ```dotenv
    NEXT_PUBLIC_LIVE_ENABLED=true
    NEXT_PUBLIC_LIVE_BASE_URL=http://127.0.0.1:8787
+   TJ_LIVE_ENABLED=true
+   TJ_LIVE_ALLOWED_ORIGIN=http://localhost:3000
    ```
 
-3. Start the listener in its own terminal. It does **not** read Next's `.env.local`, so pass its settings explicitly:
+   `TJ_LIVE_ALLOWED_ORIGIN` must match the address in the browser exactly (`localhost` and `127.0.0.1` are different origins).
+
+3. Start the listener in its own terminal:
 
    ```bash
-   TJ_LIVE_ENABLED=true TJ_LIVE_ALLOWED_ORIGIN=http://localhost:3000 npm run live
+   npm run live   # or: bun live
    ```
 
-   PowerShell:
-
-   ```powershell
-   $env:TJ_LIVE_ENABLED='true'
-   $env:TJ_LIVE_ALLOWED_ORIGIN='http://localhost:3000'
-   npm run live
-   ```
+   It loads `.env.local` then `.env`; a variable set in the shell overrides both (for example `TJ_LIVE_ENABLED=false npm run live`). The startup line reports `enabled`, `allowedOrigin` and which env files were read. If it says `"enabled":false`, every bus request answers 503 and no buses appear.
 
 4. Start the app:
 

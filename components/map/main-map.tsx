@@ -2,7 +2,7 @@
 
 import { LiveBusLayers } from "./live-buses";
 import type { LiveBounds } from "@/utils/types/live";
-import { settledLiveBounds } from "@/utils/live-scope";
+import { liveRequestBounds } from "@/utils/live-scope";
 
 import MapGL, {
   AttributionControl,
@@ -751,6 +751,8 @@ const MainMapComponent = ({
    * compares against -- the dot layer carries no stable per-feature id.
    */
   const [hoveredStop, setHoveredStop] = useState<string | null>(null);
+  // Pointer is over a live bus badge or its hit area.
+  const [hoveredBus, setHoveredBus] = useState(false);
   // Incremented for every stop hit so even re-clicking the same stop asks
   // the camera to focus it again.
   const [stopFocusRequest, setStopFocusRequest] = useState(0);
@@ -842,6 +844,7 @@ const MainMapComponent = ({
       ...order.filter((id) => id === "connection-stop"),
       ...order.filter((id) => id.startsWith("interchange-")),
       ...order.filter((id) => id === "route-stop-pin"),
+      ...order.filter((id) => id === "live-bus-arrow"),
       ...order.filter((id) => id === "live-bus-badge"),
       ...order.filter((id) => id === "live-bus-hit"),
     ];
@@ -878,16 +881,20 @@ const MainMapComponent = ({
     }
   }, []);
 
-  const liveBoundsKey = useRef("");
+  // The area currently streamed. A pan that stays inside it changes nothing,
+  // so the live connection (and the bus panel) are left alone.
+  const liveRequest = useRef<LiveBounds | null>(null);
   const reportLiveViewport = useCallback(() => {
     const map = mapRef.current?.getMap();
     if (!map || !onLiveViewportChange) return;
     const b = map.getBounds();
-    const bounds = settledLiveBounds([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
-    const key = bounds.join(",");
-    if (key !== liveBoundsKey.current) {
-      liveBoundsKey.current = key;
-      onLiveViewportChange(bounds);
+    const next = liveRequestBounds(
+      [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()],
+      liveRequest.current,
+    );
+    if (next.join(",") !== liveRequest.current?.join(",")) {
+      liveRequest.current = next;
+      onLiveViewportChange(next);
     }
   }, [onLiveViewportChange]);
 
@@ -1481,6 +1488,14 @@ const MainMapComponent = ({
         }
       }}
       onMouseMove={(e) => {
+        // A live bus is clickable too; it gets the pointer cursor but must not
+        // drive the stop-name highlight, which keys on `hoveredStop`.
+        const overBus = !!e.features?.some(
+          (feature) =>
+            feature.layer.id === "live-bus-hit" ||
+            feature.layer.id === "live-bus-badge",
+        );
+        setHoveredBus((prev) => (prev === overBus ? prev : overBus));
         const f = e.features?.[0];
         const id = f?.layer?.id;
         const name =
@@ -1494,8 +1509,11 @@ const MainMapComponent = ({
         // mousemove fires on every pointer pixel.
         setHoveredStop((prev) => (prev === name ? prev : name));
       }}
-      onMouseLeave={() => setHoveredStop(null)}
-      cursor={hoveredStop ? "pointer" : "auto"}
+      onMouseLeave={() => {
+        setHoveredStop(null);
+        setHoveredBus(false);
+      }}
+      cursor={hoveredStop || hoveredBus ? "pointer" : "auto"}
       initialViewState={{
         latitude: -6.1907,
         longitude: 106.8228,

@@ -3,8 +3,10 @@ import path from "node:path";
 import { LiveHub } from "./hub";
 import { createLiveServer } from "./http";
 import { connectTransjakarta } from "./mqtt-subscriber";
+import { loadLiveEnv } from "./env";
 
 async function main() {
+  const envFiles = loadLiveEnv();
   const rows = JSON.parse(
     await fs.readFile(
       path.join(process.cwd(), "data/gtfs/routes.json"),
@@ -33,7 +35,15 @@ async function main() {
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("Invalid TJ_LIVE_PORT");
   server.listen(port, "127.0.0.1", () =>
-    console.log(JSON.stringify({ event: "live_listening", port, enabled })),
+    console.log(
+      JSON.stringify({
+        event: "live_listening",
+        port,
+        enabled,
+        allowedOrigin: process.env.TJ_LIVE_ALLOWED_ORIGIN ?? null,
+        envFiles,
+      }),
+    ),
   );
   const shutdown = () => {
     hub.stop();

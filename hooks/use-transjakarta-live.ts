@@ -1,6 +1,10 @@
 "use client";
-import { useEffect, useState } from "react";
-import { liveScopeQuery, vehicleInScope } from "@/utils/live-scope";
+import { useEffect, useRef, useState } from "react";
+import {
+  carryOverVehicles,
+  liveScopeQuery,
+  vehicleInScope,
+} from "@/utils/live-scope";
 import {
   type LiveScope,
   LIVE_TTL_MS,
@@ -42,20 +46,49 @@ const validVehicle = (v: LiveVehicle, scope: LiveScope) =>
   Number.isFinite(v.bearing) &&
   Number.isFinite(v.receivedAt);
 
+const scopeFromKey = (key: string): LiveScope => {
+  const params = new URLSearchParams(key);
+  return {
+    routeId: params.get("route"),
+    bounds: params.has("bbox")
+      ? (params.get("bbox")!.split(",").map(Number) as LiveScope["bounds"])
+      : null,
+  };
+};
+
 /** Browser has no broker connection. Age uses elapsed local time + server-relative age. */
-export function useTransjakartaLive(scope: LiveScope, enabled: boolean) {
+export function useTransjakartaLive(
+  scope: LiveScope,
+  enabled: boolean,
+): State {
   const scopeKey = liveScopeQuery(scope);
   const [state, setState] = useState<State>(() => empty(""));
+  // The last state the effect produced, so a new viewport stream can keep the
+  // buses that are still inside its area instead of starting from nothing.
+  const latest = useRef<State>(state);
+  latest.current = state;
   useEffect(() => {
     if (!scopeKey || !enabled) return;
     // Reconstruct from the stable query so fresh bounds arrays do not reconnect each render.
-    const params = new URLSearchParams(scopeKey);
-    const currentScope: LiveScope = {
-      routeId: params.get("route"),
-      bounds: params.has("bbox")
-        ? (params.get("bbox")!.split(",").map(Number) as LiveScope["bounds"])
-        : null,
-    };
+    const currentScope = scopeFromKey(scopeKey);
+    const before = latest.current;
+    const kept = before.scopeKey
+      ? carryOverVehicles(
+          { scope: scopeFromKey(before.scopeKey), vehicles: before.vehicles },
+          currentScope,
+        )
+      : [];
+    const keptAges: Record<string, number> = {};
+    for (const v of kept) keptAges[v.id] = before.ages[v.id] ?? 0;
+    // Show the carried-over buses for this scope straight away, without the
+    // empty "connecting" frame in between.
+    if (kept.length)
+      setState({
+        scopeKey,
+        status: before.status === "live" ? "live" : "connecting",
+        vehicles: kept,
+        ages: keptAges,
+      });
     let disposed = false,
       source: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null,
@@ -64,8 +97,24 @@ export function useTransjakartaLive(scope: LiveScope, enabled: boolean) {
       frameAt = 0,
       serverTime = 0;
     let current: LiveVehicle[] = [];
-    let status: LiveStatus = "connecting";
+    let status: LiveStatus =
+      kept.length && before.status === "live" ? "live" : "connecting";
+    // Until this stream's first snapshot, the carried-over buses stand in for
+    // it. They keep their own ages so they still fade and expire on time.
+    let firstFrame = false;
+    const startedAt = performance.now();
     const refresh = () => {
+      if (!firstFrame && kept.length) {
+        const elapsed = performance.now() - startedAt;
+        const ages: Record<string, number> = {};
+        const vehicles = kept.filter((v) => {
+          const age = (keptAges[v.id] ?? 0) + elapsed;
+          ages[v.id] = age;
+          return age < LIVE_TTL_MS;
+        });
+        if (!disposed) setState({ scopeKey, status, vehicles, ages });
+        return;
+      }
       const elapsed = frameAt ? performance.now() - frameAt : 0;
       const ages: Record<string, number> = {};
       const vehicles = current.filter((v) => {
@@ -92,7 +141,10 @@ export function useTransjakartaLive(scope: LiveScope, enabled: boolean) {
     };
     const connect = () => {
       if (disposed || document.hidden || !navigator.onLine) return;
-      status = attempts ? "reconnecting" : "connecting";
+      // A viewport move into a fresh area is not a lost connection: while the
+      // carried-over buses are still showing, keep reporting "live".
+      if (!(status === "live" && !firstFrame && kept.length))
+        status = attempts ? "reconnecting" : "connecting";
       lastFrameAt = performance.now();
       refresh();
       const base = (process.env.NEXT_PUBLIC_LIVE_BASE_URL ?? "").replace(
@@ -118,6 +170,7 @@ export function useTransjakartaLive(scope: LiveScope, enabled: boolean) {
           )
             throw new Error("Invalid snapshot");
           current = p.vehicles.filter((v) => validVehicle(v, currentScope));
+          firstFrame = true;
           serverTime = p.serverTime;
           frameAt = lastFrameAt = performance.now();
           status = p.status;
@@ -137,6 +190,8 @@ export function useTransjakartaLive(scope: LiveScope, enabled: boolean) {
       retry = null;
       // A resumed page starts from a new snapshot, never a stale hidden-tab cache.
       current = [];
+      kept.length = 0;
+      firstFrame = true;
       frameAt = 0;
       status = "disconnected";
       refresh();
@@ -146,6 +201,9 @@ export function useTransjakartaLive(scope: LiveScope, enabled: boolean) {
       close();
       if (retry) clearTimeout(retry);
       retry = null;
+      // Offline is a real loss: stop presenting carried-over buses as live.
+      kept.length = 0;
+      firstFrame = true;
       status = "reconnecting";
       refresh();
     };
@@ -172,6 +230,24 @@ export function useTransjakartaLive(scope: LiveScope, enabled: boolean) {
       window.removeEventListener("online", visibility);
     };
   }, [scopeKey, enabled]);
-  // Never show previous-route/viewport data while the new effect waits to run.
-  return enabled && state.scopeKey === scopeKey ? state : empty(scopeKey);
+  if (!enabled) return empty(scopeKey);
+  if (state.scopeKey === scopeKey) return state;
+  // The scope just changed and the effect has not run yet. Never show the
+  // previous route's buses, but a viewport-to-viewport move may keep the ones
+  // still inside the new area rather than flashing an empty panel.
+  const vehicles = state.scopeKey
+    ? carryOverVehicles(
+        { scope: scopeFromKey(state.scopeKey), vehicles: state.vehicles },
+        scopeFromKey(scopeKey),
+      )
+    : [];
+  if (!vehicles.length) return empty(scopeKey);
+  const ages: Record<string, number> = {};
+  for (const v of vehicles) ages[v.id] = state.ages[v.id] ?? 0;
+  return {
+    scopeKey,
+    status: state.status === "live" ? "live" : "connecting",
+    vehicles,
+    ages,
+  };
 }

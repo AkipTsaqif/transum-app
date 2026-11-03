@@ -1530,7 +1530,22 @@ export default function Index() {
         )}
 
         {selectedBus && (
-          <div className={`pointer-events-auto absolute z-30 ${isWide ? "right-3 top-3 w-72" : "inset-x-2 bottom-2"}`}>
+          <div
+            // Top-left of the map: the top-right corner belongs to the theme
+            // switcher, which sat on top of this card. When the route panel
+            // is open on the left, the card moves to its right instead of
+            // covering it. Phones keep the card along the bottom edge.
+            className={`pointer-events-auto absolute z-30 ${isWide ? "top-3 w-72" : "inset-x-2 bottom-2"}`}
+            style={
+              isWide
+                ? {
+                    left: cardShown
+                      ? Math.max(cardWidth, expectedCardWidth) + 24
+                      : 12,
+                  }
+                : undefined
+            }
+          >
             <LiveBusCard
               vehicle={selectedBus}
               age={live.ages[selectedBus.id] ?? 0}
