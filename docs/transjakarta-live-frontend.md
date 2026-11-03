@@ -6,7 +6,7 @@ Bus badges show the GTFS route short name in the route colour. Tap/click a badge
 
 ## Required service
 
-The browser consumes **SSE**, not MQTT. The MQTT listener is a separate long-running Node/VPS service and is **not included in this frontend commit**. Frontend deployment alone cannot produce live positions. Do not enable the feature until that service is available.
+The browser consumes **SSE**, not MQTT. The MQTT listener is a separate long-running Node process (`live/`, started with `npm run live`) shipped in this branch. The Next.js frontend does not start it automatically, so a frontend-only deployment shows no live positions. The full setup, VPS and supervision runbook is [transjakarta-live.md](transjakarta-live.md).
 
 Set before starting dev or building the frontend:
 

@@ -17,9 +17,92 @@
 </p>
 <br/>
 
-## Experimental transit features
+## Live Transjakarta buses
 
-[Live Transjakarta buses (frontend): setup, SSE contract, safeguards and access limitations](docs/transjakarta-live-frontend.md). Disabled until the live service is configured; no public deployment is implied.
+Bus positions can stream onto the map. The architecture has two parts:
+
+| Part | What it is | How it runs |
+|---|---|---|
+| Frontend | Next.js map, SSE client, route badges | `npm run dev` |
+| Listener | MQTT → route/viewport-scoped SSE | `npm run live` (separate long-running process) |
+
+The browser never talks to MQTT. The listener holds **one** upstream subscription and answers many browsers, so it must be a persistent process (a VPS is the intended host), not a serverless function.
+
+### Quick start (local)
+
+1. Install dependencies. Baked `data/gtfs/` is committed, so the map renders without a sync:
+
+   ```bash
+   npm install
+   ```
+
+   The listener reads route names and colours from `data/gtfs/routes.json`. If you rebuild the feed yourself, run `npm run sync:gtfs` first.
+
+2. Create `.env.local` with the live flags (see `.env.example`):
+
+   ```dotenv
+   NEXT_PUBLIC_LIVE_ENABLED=true
+   NEXT_PUBLIC_LIVE_BASE_URL=http://127.0.0.1:8787
+   ```
+
+3. Start the listener in its own terminal. It does **not** read Next's `.env.local`, so pass its settings explicitly:
+
+   ```bash
+   TJ_LIVE_ENABLED=true TJ_LIVE_ALLOWED_ORIGIN=http://localhost:3000 npm run live
+   ```
+
+   PowerShell:
+
+   ```powershell
+   $env:TJ_LIVE_ENABLED='true'
+   $env:TJ_LIVE_ALLOWED_ORIGIN='http://localhost:3000'
+   npm run live
+   ```
+
+4. Start the app:
+
+   ```bash
+   npm run dev
+   ```
+
+5. Open <http://localhost:3000>. **Transjakarta** is the landing view and buses appear automatically — no route needs to be selected and nothing has to be switched on.
+
+### Behaviour
+
+- **No route selected** — buses inside the current map viewport are shown; panning or zooming updates the scope after the camera settles.
+- **Route selected** — the stream narrows to that corridor.
+- **Other operators** — KRL, MRT, LRT and Bandung suspend live data.
+- **Markers** — a route-code badge in that route's GTFS colour. Tap a badge (or expand *Daftar bus*) for fleet number, destination, current/next stop and how long ago the position was received.
+- **Freshness** — markers fade after 30 s and disappear after 90 s without a new observation. Device clocks are not trusted; the card says when a clock is unadjusted.
+
+### Listener endpoints
+
+```text
+GET /live/vehicles?route=<known-gtfs-route-id>
+GET /live/vehicles?bbox=<west,south,east,north>
+GET /live/health
+```
+
+A request with neither scope is rejected — there is no unrestricted whole-fleet endpoint. `routeId` is `null` for viewport streams. The listener binds to `127.0.0.1` only; put a reverse proxy in front of it for HTTPS and rate limiting.
+
+### Production notes
+
+- Run exactly **one** listener per upstream subscription and supervise it (systemd or similar). Do not scale replicas to add capacity; they would each open another upstream connection.
+- Build the frontend with `NEXT_PUBLIC_LIVE_BASE_URL` empty to use a same-origin `/live/` proxy. `NEXT_PUBLIC_*` values are baked in at build time.
+- The proxy must not buffer event streams (`proxy_buffering off;`) and needs a read timeout above the heartbeat interval.
+- Full runbook, nginx example and safeguards: [docs/transjakarta-live.md](docs/transjakarta-live.md). SSE contract: [docs/transjakarta-live-frontend.md](docs/transjakarta-live-frontend.md).
+
+### Access and licence
+
+The official CC BY 4.0 grant on Transjakarta's PPID site names **GTFS Static** only. It does not explicitly cover this realtime stream, and a working connection is not a redistribution grant. Treat the feature as experimental and confirm terms before enabling it publicly.
+
+### Tests
+
+```bash
+npm run test:live      # listener + normalizer + SSE
+npx tsx --test utils/*.test.ts
+npx tsc --noEmit
+```
 
 ## Features
 
