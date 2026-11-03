@@ -1,5 +1,9 @@
 "use client";
 
+import { LiveBusLayers } from "./live-buses";
+import type { LiveBounds } from "@/utils/types/live";
+import { settledLiveBounds } from "@/utils/live-scope";
+
 import MapGL, {
   AttributionControl,
   Layer,
@@ -347,6 +351,10 @@ interface MainMapComponentProps {
    * station card's content while the map owns its placement.
    */
   stopPopup?: React.ReactNode;
+  liveVehicles?: import("@/utils/types/live").LiveVehicle[];
+  liveAges?: Record<string, number>;
+  onLiveVehicleClick?: (id: string) => void;
+  onLiveViewportChange?: (bounds: LiveBounds) => void;
 }
 
 interface Cluster {
@@ -699,6 +707,10 @@ const MainMapComponent = ({
   onStationClick,
   onNeedAllStops,
   stopPopup,
+  liveVehicles = [],
+  liveAges = {},
+  onLiveVehicleClick,
+  onLiveViewportChange,
 }: MainMapComponentProps) => {
   // Auto-fit frames a whole route at roughly z11-z13, so the old "> 12"
   // marker gate hid every stop the moment fitBounds finished. Pins are cheap
@@ -830,6 +842,8 @@ const MainMapComponent = ({
       ...order.filter((id) => id === "connection-stop"),
       ...order.filter((id) => id.startsWith("interchange-")),
       ...order.filter((id) => id === "route-stop-pin"),
+      ...order.filter((id) => id === "live-bus-badge"),
+      ...order.filter((id) => id === "live-bus-hit"),
     ];
     if (desired.length < 2) return;
 
@@ -863,6 +877,19 @@ const MainMapComponent = ({
       map.addImage(id, makeDotImage(spec), { pixelRatio: 2 });
     }
   }, []);
+
+  const liveBoundsKey = useRef("");
+  const reportLiveViewport = useCallback(() => {
+    const map = mapRef.current?.getMap();
+    if (!map || !onLiveViewportChange) return;
+    const b = map.getBounds();
+    const bounds = settledLiveBounds([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+    const key = bounds.join(",");
+    if (key !== liveBoundsKey.current) {
+      liveBoundsKey.current = key;
+      onLiveViewportChange(bounds);
+    }
+  }, [onLiveViewportChange]);
 
   /** Both style-level fixups, for `onLoad` and `onStyleData`. */
   const handleStyleReady = useCallback(() => {
@@ -1345,6 +1372,7 @@ const MainMapComponent = ({
       // Clicking a GPU circle layer: hit-test by layer id, since these
       // are painted pixels rather than DOM nodes with their own handlers.
       interactiveLayerIds={[
+        ...(liveVehicles.length ? ["live-bus-badge", "live-bus-hit"] : []),
         ...(connectionGeo.features.length ? ["connection-stop"] : []),
         // Interchanges are always drawn as the real connector pill; the
         // two platforms are held at least
@@ -1359,6 +1387,13 @@ const MainMapComponent = ({
           : []),
       ]}
       onClick={(e) => {
+        const bus = e.features?.find(
+          (feature) => feature.layer.id === "live-bus-hit" || feature.layer.id === "live-bus-badge",
+        );
+        if (bus) {
+          onLiveVehicleClick?.(String(bus.properties?.id ?? ""));
+          return;
+        }
         const f =
           e.features?.find((feature) =>
             feature.layer.id.startsWith("interchange-"),
@@ -1467,7 +1502,9 @@ const MainMapComponent = ({
         zoom: 10,
       }}
       onMove={handleMove}
-      onLoad={handleStyleReady}
+      onMoveEnd={reportLiveViewport}
+      onResize={reportLiveViewport}
+      onLoad={() => { handleStyleReady(); reportLiveViewport(); }}
       onStyleData={handleStyleReady}
       // Fills whatever the parent allots. A hard 100vh would overflow the
       // mobile layout, where the map shares the screen with a bottom sheet.
@@ -1985,6 +2022,7 @@ const MainMapComponent = ({
           {stopPopup}
         </Popup>
       )}
+      <LiveBusLayers vehicles={liveVehicles} ages={liveAges} />
     </MapGL>
   );
 };

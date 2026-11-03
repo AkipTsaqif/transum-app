@@ -1,6 +1,9 @@
 "use client";
 
 import MainMapComponent, { type DrawnLayer } from "@/components/map/main-map";
+import { LiveControl, LiveBusCard } from "@/components/live/live-control";
+import { useTransjakartaLive } from "@/hooks/use-transjakarta-live";
+import type { LiveBounds } from "@/utils/types/live";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -118,9 +121,8 @@ const modeLabel = (m: View) =>
 
 export default function Index() {
   // What the picker shows: one dataset, or "all" of them together.
-  // Semua Moda is the landing view: one map with every network on it, and
-  // the picker can narrow to a single system from there.
-  const [view, setView] = useState<View>("all");
+  // Transjakarta is the landing network; the picker can compose all modes.
+  const [view, setView] = useState<View>("gtfs");
   const isAll = view === "all" || view === "bandung-all";
   // A request number, not a boolean: each deliberate mode switch asks the map
   // to fit the new network exactly once, after its overview has loaded.
@@ -140,6 +142,24 @@ export default function Index() {
   // Mode-qualified ("krl:A"): route ids are only unique within one mode.
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [detail, setDetail] = useState<RouteDetail | null>(null);
+  const liveSelection = selectedKey ? splitRouteKey(selectedKey) : null;
+  const liveRouteId = liveSelection?.mode === "gtfs" ? liveSelection.routeId : null;
+  const liveAvailable = process.env.NEXT_PUBLIC_LIVE_ENABLED === "true";
+  const [liveVisible, setLiveVisible] = useState(true);
+  const [liveBounds, setLiveBounds] = useState<LiveBounds | null>(null);
+  const liveEligible = (view === "gtfs" || view === "all") &&
+    (!liveSelection || liveSelection.mode === "gtfs");
+  const [pickedBus, setPickedBus] = useState<{
+    routeId: string;
+    id: string;
+  } | null>(null);
+  const liveEnabled = liveAvailable && liveEligible && liveVisible;
+  const live = useTransjakartaLive({ routeId: liveRouteId, bounds: liveRouteId ? null : liveBounds }, liveEnabled);
+  const selectedBus = live.vehicles.find((v) => v.id === pickedBus?.id && v.routeId === pickedBus.routeId);
+  const pickBus = (id: string) => {
+    const bus = live.vehicles.find((v) => v.id === id);
+    if (bus) setPickedBus({ routeId: bus.routeId, id });
+  };
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
@@ -273,6 +293,7 @@ export default function Index() {
       abortRef.current?.abort();
       stationAbortRef.current?.abort();
       setSelectedKey(null);
+      setPickedBus(null);
       setVariantTripId(null);
       setDetail(null);
       setDetailError(null);
@@ -773,6 +794,7 @@ export default function Index() {
     (operator: TransitMode, routeId: string) => {
       if (!viewModes.includes(operator)) setView(operator);
       clearStation();
+      setPickedBus(null);
       setSelectedKey(routeKey(operator, routeId));
     },
     [viewModes, clearStation],
@@ -788,6 +810,7 @@ export default function Index() {
     setFocusStop(null);
     clearStation();
     setSelectedKey(null);
+    setPickedBus(null);
     setVariantTripId(null);
     setDetail(null);
     setDetailError(null);
@@ -1256,7 +1279,19 @@ export default function Index() {
         </div>
 
         <Separator className="hidden md:block" />
-        <div className="flex w-full grow flex-col overflow-hidden">
+        {liveAvailable && liveEligible && (
+          <LiveControl
+            enabled={liveEnabled}
+            status={live.status}
+            vehicles={live.vehicles}
+            ages={live.ages}
+            onPick={pickBus}
+            onToggle={() => {
+              setLiveVisible((visible) => !visible);
+              setPickedBus(null);
+            }}
+          />
+        )}        <div className="flex w-full grow flex-col overflow-hidden">
           <div className="px-4 pb-3 md:p-4">
             {/*
                           The sidebar is always dark navy, so the input cannot
@@ -1407,6 +1442,7 @@ export default function Index() {
                         }`}
                         onClick={() => {
                           clearStation();
+                          setPickedBus(null);
                           setSelectedKey(isSelected ? null : key);
                           // Give the map room once a route is
                           // picked; no-op on desktop.
@@ -1493,7 +1529,20 @@ export default function Index() {
           </div>
         )}
 
+        {selectedBus && (
+          <div className={`pointer-events-auto absolute z-30 ${isWide ? "right-3 top-3 w-72" : "inset-x-2 bottom-2"}`}>
+            <LiveBusCard
+              vehicle={selectedBus}
+              age={live.ages[selectedBus.id] ?? 0}
+              onClose={() => setPickedBus(null)}
+            />
+          </div>
+        )}
         <MainMapComponent
+          onLiveViewportChange={setLiveBounds}
+          liveVehicles={live.vehicles}
+          liveAges={live.ages}
+          onLiveVehicleClick={pickBus}
           layers={layers}
           previewLayer={previewLayer}
           connections={connections}

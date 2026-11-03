@@ -17,6 +17,10 @@
 </p>
 <br/>
 
+## Experimental transit features
+
+[Live Transjakarta buses (frontend): setup, SSE contract, safeguards and access limitations](docs/transjakarta-live-frontend.md). Disabled until the live service is configured; no public deployment is implied.
+
 ## Features
 
 - Works across the entire [Next.js](https://nextjs.org) stack
