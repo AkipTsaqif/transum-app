@@ -353,6 +353,9 @@ interface MainMapComponentProps {
   stopPopup?: React.ReactNode;
   liveVehicles?: import("@/utils/types/live").LiveVehicle[];
   liveAges?: Record<string, number>;
+  /** Route whose geometry the page already loaded, reused for live shapes. */
+  liveSelectedRouteId?: string | null;
+  liveSelectedDetail?: import("@/utils/types/gtfs").RouteDetail | null;
   onLiveVehicleClick?: (id: string) => void;
   onLiveViewportChange?: (bounds: LiveBounds) => void;
 }
@@ -709,6 +712,8 @@ const MainMapComponent = ({
   stopPopup,
   liveVehicles = [],
   liveAges = {},
+  liveSelectedRouteId = null,
+  liveSelectedDetail = null,
   onLiveVehicleClick,
   onLiveViewportChange,
 }: MainMapComponentProps) => {
@@ -2040,7 +2045,13 @@ const MainMapComponent = ({
           {stopPopup}
         </Popup>
       )}
-      <LiveBusLayers vehicles={liveVehicles} ages={liveAges} />
+      <LiveBusLayers
+        vehicles={liveVehicles}
+        ages={liveAges}
+        zoom={exactZoom}
+        selectedRouteId={liveSelectedRouteId}
+        selectedDetail={liveSelectedDetail}
+      />
     </MapGL>
   );
 };

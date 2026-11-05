@@ -47,7 +47,8 @@ const validVehicle = (v: LiveVehicle, scope: LiveScope) =>
   v.latitude <= -5.8 &&
   v.longitude >= 106.3 &&
   v.longitude <= 107.4 &&
-  Number.isFinite(v.bearing) &&
+  (v.bearing === null || Number.isFinite(v.bearing)) &&
+  typeof v.tripId === "string" &&
   Number.isFinite(v.receivedAt);
 
 const scopeFromKey = (key: string): LiveScope => {

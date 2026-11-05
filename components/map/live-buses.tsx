@@ -1,9 +1,11 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layer, Source, useMap } from "react-map-gl/maplibre";
-import type { FeatureCollection, Point } from "geojson";
+import type { Feature, FeatureCollection, Point } from "geojson";
+import type { RouteDetail } from "@/utils/types/gtfs";
 import { LIVE_STALE_MS, type LiveVehicle } from "@/utils/types/live";
-import { useLiveMotion } from "@/hooks/use-live-motion";
+import { LIVE_MOTION_MIN_ZOOM, useLiveMotion } from "@/hooks/use-live-motion";
+import { useLiveShapes } from "@/hooks/use-live-shapes";
 import {
   ARROW_HEIGHT,
   ARROW_WIDTH,
@@ -20,33 +22,116 @@ const imageKey = (v: LiveVehicle) =>
   `live-route2-${encodeURIComponent(v.routeShortName)}-${v.routeColor.slice(1)}-${v.routeTextColor.slice(1)}`;
 const arrowKey = (v: LiveVehicle) => `live-arrow-${v.routeColor.slice(1)}`;
 
-/** Measured once; the label width decides the box width and the arrow offset. */
+/**
+ * Measured label widths, per route code.
+ *
+ * `measureText` used to run for every bus on every animation frame (thousands
+ * of calls per frame with the viewport fleet visible). The width of a label
+ * never changes, so it is measured once and cached.
+ */
+const widths = new Map<string, number>();
 let measureCtx: CanvasRenderingContext2D | null = null;
 const labelWidth = (label: string): number => {
+  const cached = widths.get(label);
+  if (cached !== undefined) return cached;
   measureCtx ??= document.createElement("canvas").getContext("2d");
-  if (!measureCtx) return 0;
-  measureCtx.font = FONT;
-  return measureCtx.measureText(label).width;
+  const width = measureCtx
+    ? ((measureCtx.font = FONT), measureCtx.measureText(label).width)
+    : 0;
+  widths.set(label, width);
+  return width;
+};
+
+/** One GeoJSON feature for a bus; shared by the React data and per-frame writes. */
+const featureFor = (
+  v: LiveVehicle,
+  faded: boolean,
+  mapBearing: number,
+): Feature<Point> => {
+  const width = badgeWidth(labelWidth(v.routeShortName));
+  const heading = v.bearing;
+  return {
+    type: "Feature",
+    id: v.id,
+    properties: {
+      id: v.id,
+      route: v.routeShortName,
+      color: v.routeColor,
+      image: imageKey(v),
+      arrow: heading === null ? null : arrowKey(v),
+      heading,
+      arrowOffset:
+        heading === null
+          ? [0, 0]
+          : arrowOffset(width, screenHeading(heading, mapBearing)),
+      faded: faded ? 0.4 : 1,
+    },
+    geometry: { type: "Point", coordinates: [v.longitude, v.latitude] },
+  };
 };
 
 /**
  * Route pills with a heading arrow just outside the box.
  *
- * The pill stays screen-aligned and readable. The arrow is its own symbol:
- * it rotates with the bus (`icon-rotate`, in map space, so turning the map
- * turns it too) and is pushed out past the box edge in that direction.
+ * The pill stays screen-aligned and readable. The arrow is its own symbol: it
+ * rotates with the bus in map space and is pushed out past the box edge, so a
+ * bus with no known heading simply has no arrow.
  */
 export function LiveBusLayers({
   vehicles,
   ages,
+  zoom,
+  selectedRouteId,
+  selectedDetail,
 }: {
   vehicles: LiveVehicle[];
   ages: Record<string, number>;
+  zoom: number;
+  selectedRouteId: string | null;
+  selectedDetail: RouteDetail | null;
 }) {
   const { current: map } = useMap();
-  const displayed = useLiveMotion(vehicles, ages);
-  // Whole degrees: the edge distance only changes visibly at that scale.
+  const shapeFor = useLiveShapes({
+    vehicles,
+    zoom,
+    enabled: vehicles.length > 0,
+    selectedRouteId,
+    selectedDetail,
+  });
   const [mapBearing, setMapBearing] = useState(0);
+  /** Last pose written per bus, so only genuinely moved features are sent. */
+  const written = useRef(new Map<string, string>());
+
+  const onFrame = useCallback(
+    (frame: LiveVehicle[]) => {
+      const source = map?.getSource?.("live-buses") as
+        { updateData?: (diff: unknown) => void } | undefined;
+      if (!source?.updateData) return;
+      const update: Feature<Point>[] = [];
+      const seen = new Set<string>();
+      for (const v of frame) {
+        seen.add(v.id);
+        const key = `${v.latitude.toFixed(6)},${v.longitude.toFixed(6)},${v.bearing ?? "x"}`;
+        if (written.current.get(v.id) === key) continue;
+        written.current.set(v.id, key);
+        update.push(
+          featureFor(v, (ages[v.id] ?? 0) >= LIVE_STALE_MS, mapBearing),
+        );
+      }
+      const remove = [...written.current.keys()].filter((id) => !seen.has(id));
+      if (!update.length && !remove.length) return;
+      for (const id of remove) written.current.delete(id);
+      try {
+        source.updateData(remove.length ? { update, remove } : { update });
+      } catch {
+        // Source swapped mid-flight (style reload): the next React sync redraws.
+      }
+    },
+    [map, ages, mapBearing],
+  );
+
+  const displayed = useLiveMotion(vehicles, ages, { zoom, shapeFor, onFrame });
+
   useEffect(() => {
     if (!map) return;
     const sync = () => setMapBearing(Math.round(map.getBearing()));
@@ -141,40 +226,25 @@ export function LiveBusLayers({
   const geo = useMemo<FeatureCollection<Point>>(
     () => ({
       type: "FeatureCollection",
-      features: displayed.map((v) => {
-        const width = badgeWidth(labelWidth(v.routeShortName));
-        return {
-          type: "Feature",
-          id: v.id,
-          properties: {
-            id: v.id,
-            route: v.routeShortName,
-            color: v.routeColor,
-            image: imageKey(v),
-            arrow: arrowKey(v),
-            heading: v.bearing,
-            arrowOffset: arrowOffset(
-              width,
-              screenHeading(v.bearing, mapBearing),
-            ),
-            faded: (ages[v.id] ?? 0) >= LIVE_STALE_MS ? 0.4 : 1,
-          },
-          geometry: {
-            type: "Point",
-            coordinates: [v.longitude, v.latitude],
-          },
-        };
-      }),
+      features: displayed.map((v) =>
+        featureFor(v, (ages[v.id] ?? 0) >= LIVE_STALE_MS, mapBearing),
+      ),
     }),
     [displayed, ages, mapBearing],
   );
+
+  // A full re-upload resets the source; forget what the diff thought it wrote.
+  useEffect(() => {
+    written.current.clear();
+  }, [geo]);
+
   return (
     <Source id="live-buses" type="geojson" data={geo}>
       <Layer
         id="live-bus-arrow"
         type="symbol"
         layout={{
-          "icon-image": ["get", "arrow"],
+          "icon-image": ["coalesce", ["get", "arrow"], ""],
           // Map space: a bus heading east stays pointing at the east on the
           // ground however the user rotates the map.
           "icon-rotation-alignment": "map",

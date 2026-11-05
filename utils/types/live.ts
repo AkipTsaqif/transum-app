@@ -24,11 +24,14 @@ export interface LiveVehicle {
   routeShortName: string;
   routeColor: string;
   routeTextColor: string;
+  /** GTFS trip id from the feed, used to find the shape the bus drives. May be empty. */
+  tripId: string;
   label: string;
   headsign: string;
   latitude: number;
   longitude: number;
-  bearing: number;
+  /** Degrees clockwise from north, or null when the feed gives no usable heading. */
+  bearing: number | null;
   currentStop: string;
   nextStop: string;
   /** Sidecar receipt time of the last advancing observation, not a browser clock. */

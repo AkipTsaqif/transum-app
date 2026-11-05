@@ -1557,6 +1557,8 @@ export default function Index() {
           onLiveViewportChange={setLiveBounds}
           liveVehicles={live.vehicles}
           liveAges={live.ages}
+          liveSelectedRouteId={liveRouteId}
+          liveSelectedDetail={liveRouteId ? detail : null}
           onLiveVehicleClick={pickBus}
           layers={layers}
           previewLayer={previewLayer}

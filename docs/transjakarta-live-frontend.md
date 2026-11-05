@@ -41,6 +41,16 @@ Each vehicle has validated raw/snapped coordinates, routeId/routeShortName/route
 
 The browser computes receipt age from `serverTime - receivedAt` plus elapsed local time, not by comparing server epoch to the browser's wall clock. Elapsed time uses both monotonic and wall clocks so system sleep expires old observations even if a browser pauses its monotonic clock. Uncorrected bus time is not the freshness oracle. Markers fade after30s and expire after90s without observation updates. Hidden tabs close SSE but keep the last positions in memory; on return they remain visible while reconnecting, with their original receipt ages advanced by the hidden interval. Empty connecting snapshots do not clear this cache; a live snapshot replaces it, including an empty one. Nothing is written to localStorage or a position-history store. Reconnect uses bounded backoff. Live updates must not modify camera bounds.
 
+### Motion, and what it does not claim
+
+Markers glide between fixes at a constant speed along **the shape of the bus's own trip**, so they follow the road through a turn instead of cutting across a block. The glide lasts about as long as that bus's measured interval between fixes, clamped to1-6 s. Consequences, stated plainly:
+
+- **The marker trails the fix by up to about one interval.** It is never extrapolated ahead of the last observation, so a bus is never drawn where no data places it. The card's receipt age still describes the fix, not the glide.
+- **A shape is used only when it clearly explains the move.** No shape, an observation more than30 m off the shape, projections that run backwards (opposite direction, or a loop the bus already passed), or a detour more than twice the straight distance (a different branch of a fork) all fall back to a straight glide. Shapes come from the static GTFS route detail, fetched on demand for visible routes only above zoom12; the selected route reuses the detail already on the page.
+- **Motion is display-only and stops when it cannot be seen.** Below zoom12 the markers snap to each fix instead of animating, because a35 m move is under two pixels there. Reduced-motion users get snapped positions, hidden tabs stop animating, and stale or implausibly jumped fixes snap rather than crawl.
+- **Heading is a claim, so an unknown heading is no arrow.** A missing heading hides the arrow; a stationary bus keeps its last confident heading rather than spinning at a halte; during a glide the arrow follows the road's local direction.
+- Per-frame positions are written straight into the map source (a diff of only the buses that moved). React re-renders only when the set of buses, their badges, or their faded state changes.
+
 ## Verification
 
 ```bash

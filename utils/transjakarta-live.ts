@@ -81,10 +81,13 @@ export function normalizeLiveVehicle(
     label: id,
     routeId,
     ...routeBadge(routeId, styles),
+    tripId: text(p.trip_id, 80),
     headsign: text(p.trip_headsign),
     latitude: lat,
     longitude: lon,
-    bearing: finite(p.bearing) ? ((p.bearing % 360) + 360) % 360 : 0,
+    // Unknown is not north: a 0 default drew a confident arrow pointing the
+    // wrong way for every bus whose feed omitted the heading.
+    bearing: finite(p.bearing) ? ((p.bearing % 360) + 360) % 360 : null,
     currentStop: text(p.curr_stops),
     nextStop: text(p.next_stops),
     receivedAt,

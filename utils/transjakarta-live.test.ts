@@ -71,6 +71,27 @@ test("validated snapped coordinates fall back to raw, and route codes join exact
     null,
   );
 });
+test("a missing or invalid bearing is unknown, never a confident north", () => {
+  for (const bearing of [undefined, null, NaN, Infinity, "90"]) {
+    assert.equal(
+      normalizeLiveVehicle(payload({ bearing }), routes, now)?.bearing,
+      null,
+      String(bearing),
+    );
+  }
+  // 0 is a real heading (due north), not a placeholder.
+  assert.equal(normalizeLiveVehicle(payload({ bearing: 0 }), routes, now)?.bearing, 0);
+  assert.equal(normalizeLiveVehicle(payload({ bearing: -90 }), routes, now)?.bearing, 270);
+  assert.equal(normalizeLiveVehicle(payload({ bearing: 450 }), routes, now)?.bearing, 90);
+});
+test("trip id is carried as capped text so the client can find the trip's shape", () => {
+  assert.equal(normalizeLiveVehicle(payload(), routes, now)?.tripId, "1-A");
+  assert.equal(normalizeLiveVehicle(payload({ trip_id: 42 }), routes, now)?.tripId, "");
+  assert.equal(
+    normalizeLiveVehicle(payload({ trip_id: "x".repeat(500) }), routes, now)?.tripId.length,
+    80,
+  );
+});
 test("seconds normalize to milliseconds, clock offset is not assumed to be seven hours", () => {
   const v = normalizeLiveVehicle(
     payload({ timestamp: (now - 3600_000) / 1000 }),

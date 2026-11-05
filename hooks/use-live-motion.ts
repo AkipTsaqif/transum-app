@@ -1,29 +1,88 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { LiveMotion } from "@/utils/live-motion";
-import type { LiveVehicle } from "@/utils/types/live";
+import { LiveMotion, type ShapeFor } from "@/utils/live-motion";
+import { LIVE_STALE_MS, type LiveVehicle } from "@/utils/types/live";
 
-/** One bounded animation loop for all bus markers, local to the map layer.
- * Sidebar/detail data and receipt ages remain the actual observations. */
+/** Only above this zoom is a glide visible at all (35 m ~ 1.8 px at z12). */
+export const LIVE_MOTION_MIN_ZOOM = 12;
+/** Cap GPU uploads; 120 Hz displays do not need 120 GeoJSON writes. */
+const FRAME_MS = 1000 / 30;
+
+/**
+ * Identity of what React must render: membership plus anything that changes a
+ * badge's appearance. Positions are deliberately excluded — those are pushed
+ * straight to the map source every frame instead of through React state.
+ */
+const appearanceKey = (
+  vehicles: LiveVehicle[],
+  ages: Record<string, number>,
+): string =>
+  vehicles
+    .map(
+      (v) =>
+        `${v.id}|${v.routeShortName}|${v.routeColor}|${v.routeTextColor}|${
+          (ages[v.id] ?? 0) >= LIVE_STALE_MS ? 1 : 0
+        }`,
+    )
+    .sort()
+    .join(",");
+
+/**
+ * Smooth live markers without a React render per frame.
+ *
+ * The engine owns interpolation; this hook pushes sampled poses to `onFrame`
+ * (a direct GeoJSON source update) at a capped rate. React state changes only
+ * when the set of vehicles, their badges or their faded state changes.
+ */
 export function useLiveMotion(
   vehicles: LiveVehicle[],
   ages: Record<string, number>,
+  options: {
+    zoom: number;
+    shapeFor?: ShapeFor;
+    onFrame?: (frame: LiveVehicle[]) => void;
+    minZoom?: number;
+  },
 ) {
+  const { zoom, shapeFor, onFrame, minZoom = LIVE_MOTION_MIN_ZOOM } = options;
   const engine = useRef(new LiveMotion());
   const inputs = useRef({ vehicles, ages });
   const [displayed, setDisplayed] = useState(vehicles);
+  const shown = useRef(appearanceKey(vehicles, ages));
   const frame = useRef<number | null>(null);
   const tick = useRef<((time: number) => void) | null>(null);
   const reducedMotion = useRef(false);
+  const live = useRef({ zoom, shapeFor, onFrame, minZoom });
+  live.current = { zoom, shapeFor, onFrame, minZoom };
 
   useEffect(() => {
     const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
     reducedMotion.current = preference.matches;
     let lastPaint = -Infinity;
+
     const cancel = () => {
       if (frame.current !== null) cancelAnimationFrame(frame.current);
       frame.current = null;
     };
+
+    /** Publish the current samples and re-render only if appearance changed. */
+    const publish = (now: number) => {
+      const sampled = engine.current.sample(now);
+      live.current.onFrame?.(sampled);
+      const key = appearanceKey(sampled, inputs.current.ages);
+      if (key !== shown.current) {
+        shown.current = key;
+        setDisplayed(sampled);
+      }
+    };
+
+    const syncReact = (now: number) => {
+      const sampled = engine.current.sample(now);
+      shown.current = appearanceKey(sampled, inputs.current.ages);
+      setDisplayed(sampled);
+      live.current.onFrame?.(sampled);
+    };
+
     const reset = () => {
       cancel();
       const now = performance.now();
@@ -32,21 +91,36 @@ export function useLiveMotion(
         inputs.current.ages,
         now,
         true,
+        live.current.shapeFor,
       );
-      setDisplayed(engine.current.sample(now));
+      syncReact(now);
     };
+
     tick.current = (now) => {
       frame.current = null;
       if (document.hidden) return;
+      // No visible glide below the zoom floor: stop the loop, show the truth.
+      if (live.current.zoom < live.current.minZoom) {
+        const at = performance.now();
+        engine.current.update(
+          inputs.current.vehicles,
+          inputs.current.ages,
+          at,
+          true,
+          live.current.shapeFor,
+        );
+        syncReact(at);
+        return;
+      }
       const moving = engine.current.isMoving(now);
-      // Cap GeoJSON uploads to ~30 fps, rather than uploading 120+ times/sec
-      // on high-refresh displays. Always paint the exact endpoint at the end.
-      if (!moving || now - lastPaint >= 1000 / 30) {
-        setDisplayed(engine.current.sample(now));
+      if (!moving || now - lastPaint >= FRAME_MS) {
+        publish(now);
         lastPaint = now;
       }
       if (moving) frame.current = requestAnimationFrame(tick.current!);
+      else publish(now);
     };
+
     const visibility = () => reset(); // Never replay a hidden tab's path.
     const preferenceChanged = () => {
       reducedMotion.current = preference.matches;
@@ -62,6 +136,16 @@ export function useLiveMotion(
     };
   }, []);
 
+  const run = () => {
+    if (
+      !document.hidden &&
+      live.current.zoom >= live.current.minZoom &&
+      frame.current === null &&
+      tick.current
+    )
+      frame.current = requestAnimationFrame(tick.current);
+  };
+
   useEffect(() => {
     inputs.current = { vehicles, ages };
     const now = performance.now();
@@ -69,17 +153,48 @@ export function useLiveMotion(
       vehicles,
       ages,
       now,
-      document.hidden || reducedMotion.current,
+      document.hidden ||
+        reducedMotion.current ||
+        live.current.zoom < live.current.minZoom,
+      shapeFor,
     );
-    setDisplayed(engine.current.sample(now));
-    if (
-      !document.hidden &&
-      engine.current.isMoving(now) &&
-      frame.current === null &&
-      tick.current
-    )
-      frame.current = requestAnimationFrame(tick.current);
-  }, [vehicles, ages]);
+    // Sync React here: `vehicles` changing is exactly the membership event.
+    shown.current = appearanceKey(vehicles, ages);
+    const sampled = engine.current.sample(now);
+    setDisplayed(sampled);
+    onFrame?.(sampled);
+    if (engine.current.isMoving(now)) run();
+  }, [vehicles, ages, shapeFor, onFrame]);
+
+  // Only the zoom *floor crossing* matters. Depending on the live zoom value
+  // itself would re-render on every wheel frame while zooming out.
+  const aboveFloor = useRef(zoom >= minZoom);
+  useEffect(() => {
+    const next = zoom >= minZoom;
+    if (next === aboveFloor.current) return;
+    aboveFloor.current = next;
+    const at = performance.now();
+    if (!next) {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+      frame.current = null;
+      engine.current.update(
+        inputs.current.vehicles,
+        inputs.current.ages,
+        at,
+        true,
+        shapeFor,
+      );
+      shown.current = appearanceKey(
+        inputs.current.vehicles,
+        inputs.current.ages,
+      );
+      const sampled = engine.current.sample(at);
+      setDisplayed(sampled);
+      onFrame?.(sampled);
+      return;
+    }
+    if (engine.current.isMoving(at)) run();
+  }, [zoom, minZoom, shapeFor, onFrame]);
 
   return displayed;
 }
