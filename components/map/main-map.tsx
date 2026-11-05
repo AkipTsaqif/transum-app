@@ -1,5 +1,9 @@
 "use client";
 
+import { LiveBusLayers } from "./live-buses";
+import type { LiveBounds } from "@/utils/types/live";
+import { liveRequestBounds } from "@/utils/live-scope";
+
 import MapGL, {
   AttributionControl,
   Layer,
@@ -347,6 +351,13 @@ interface MainMapComponentProps {
    * station card's content while the map owns its placement.
    */
   stopPopup?: React.ReactNode;
+  liveVehicles?: import("@/utils/types/live").LiveVehicle[];
+  liveAges?: Record<string, number>;
+  /** Route whose geometry the page already loaded, reused for live shapes. */
+  liveSelectedRouteId?: string | null;
+  liveSelectedDetail?: import("@/utils/types/gtfs").RouteDetail | null;
+  onLiveVehicleClick?: (id: string) => void;
+  onLiveViewportChange?: (bounds: LiveBounds) => void;
 }
 
 interface Cluster {
@@ -699,6 +710,12 @@ const MainMapComponent = ({
   onStationClick,
   onNeedAllStops,
   stopPopup,
+  liveVehicles = [],
+  liveAges = {},
+  liveSelectedRouteId = null,
+  liveSelectedDetail = null,
+  onLiveVehicleClick,
+  onLiveViewportChange,
 }: MainMapComponentProps) => {
   // Auto-fit frames a whole route at roughly z11-z13, so the old "> 12"
   // marker gate hid every stop the moment fitBounds finished. Pins are cheap
@@ -739,6 +756,8 @@ const MainMapComponent = ({
    * compares against -- the dot layer carries no stable per-feature id.
    */
   const [hoveredStop, setHoveredStop] = useState<string | null>(null);
+  // Pointer is over a live bus badge or its hit area.
+  const [hoveredBus, setHoveredBus] = useState(false);
   // Incremented for every stop hit so even re-clicking the same stop asks
   // the camera to focus it again.
   const [stopFocusRequest, setStopFocusRequest] = useState(0);
@@ -830,6 +849,9 @@ const MainMapComponent = ({
       ...order.filter((id) => id === "connection-stop"),
       ...order.filter((id) => id.startsWith("interchange-")),
       ...order.filter((id) => id === "route-stop-pin"),
+      ...order.filter((id) => id === "live-bus-arrow"),
+      ...order.filter((id) => id === "live-bus-badge"),
+      ...order.filter((id) => id === "live-bus-hit"),
     ];
     if (desired.length < 2) return;
 
@@ -863,6 +885,23 @@ const MainMapComponent = ({
       map.addImage(id, makeDotImage(spec), { pixelRatio: 2 });
     }
   }, []);
+
+  // The area currently streamed. A pan that stays inside it changes nothing,
+  // so the live connection (and the bus panel) are left alone.
+  const liveRequest = useRef<LiveBounds | null>(null);
+  const reportLiveViewport = useCallback(() => {
+    const map = mapRef.current?.getMap();
+    if (!map || !onLiveViewportChange) return;
+    const b = map.getBounds();
+    const next = liveRequestBounds(
+      [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()],
+      liveRequest.current,
+    );
+    if (next.join(",") !== liveRequest.current?.join(",")) {
+      liveRequest.current = next;
+      onLiveViewportChange(next);
+    }
+  }, [onLiveViewportChange]);
 
   /** Both style-level fixups, for `onLoad` and `onStyleData`. */
   const handleStyleReady = useCallback(() => {
@@ -1342,9 +1381,14 @@ const MainMapComponent = ({
   return (
     <MapGL
       ref={mapRef}
+      // Symbol placement normally waits up to the 300ms fade duration before
+      // adopting new anchors. Live vehicle icons need each applied pose now;
+      // disabling the fade also makes ordinary label changes instantaneous.
+      fadeDuration={0}
       // Clicking a GPU circle layer: hit-test by layer id, since these
       // are painted pixels rather than DOM nodes with their own handlers.
       interactiveLayerIds={[
+        ...(liveVehicles.length ? ["live-bus-badge", "live-bus-hit"] : []),
         ...(connectionGeo.features.length ? ["connection-stop"] : []),
         // Interchanges are always drawn as the real connector pill; the
         // two platforms are held at least
@@ -1359,6 +1403,13 @@ const MainMapComponent = ({
           : []),
       ]}
       onClick={(e) => {
+        const bus = e.features?.find(
+          (feature) => feature.layer.id === "live-bus-hit" || feature.layer.id === "live-bus-badge",
+        );
+        if (bus) {
+          onLiveVehicleClick?.(String(bus.properties?.id ?? ""));
+          return;
+        }
         const f =
           e.features?.find((feature) =>
             feature.layer.id.startsWith("interchange-"),
@@ -1446,6 +1497,14 @@ const MainMapComponent = ({
         }
       }}
       onMouseMove={(e) => {
+        // A live bus is clickable too; it gets the pointer cursor but must not
+        // drive the stop-name highlight, which keys on `hoveredStop`.
+        const overBus = !!e.features?.some(
+          (feature) =>
+            feature.layer.id === "live-bus-hit" ||
+            feature.layer.id === "live-bus-badge",
+        );
+        setHoveredBus((prev) => (prev === overBus ? prev : overBus));
         const f = e.features?.[0];
         const id = f?.layer?.id;
         const name =
@@ -1459,15 +1518,20 @@ const MainMapComponent = ({
         // mousemove fires on every pointer pixel.
         setHoveredStop((prev) => (prev === name ? prev : name));
       }}
-      onMouseLeave={() => setHoveredStop(null)}
-      cursor={hoveredStop ? "pointer" : "auto"}
+      onMouseLeave={() => {
+        setHoveredStop(null);
+        setHoveredBus(false);
+      }}
+      cursor={hoveredStop || hoveredBus ? "pointer" : "auto"}
       initialViewState={{
         latitude: -6.1907,
         longitude: 106.8228,
         zoom: 10,
       }}
       onMove={handleMove}
-      onLoad={handleStyleReady}
+      onMoveEnd={reportLiveViewport}
+      onResize={reportLiveViewport}
+      onLoad={() => { handleStyleReady(); reportLiveViewport(); }}
       onStyleData={handleStyleReady}
       // Fills whatever the parent allots. A hard 100vh would overflow the
       // mobile layout, where the map shares the screen with a bottom sheet.
@@ -1985,6 +2049,13 @@ const MainMapComponent = ({
           {stopPopup}
         </Popup>
       )}
+      <LiveBusLayers
+        vehicles={liveVehicles}
+        ages={liveAges}
+        zoom={exactZoom}
+        selectedRouteId={liveSelectedRouteId}
+        selectedDetail={liveSelectedDetail}
+      />
     </MapGL>
   );
 };
