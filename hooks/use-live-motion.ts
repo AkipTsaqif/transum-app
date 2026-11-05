@@ -2,11 +2,12 @@
 import { useEffect, useRef, useState } from "react";
 import { LiveMotion, type ShapeFor } from "@/utils/live-motion";
 import { LIVE_STALE_MS, type LiveVehicle } from "@/utils/types/live";
+import { LIVE_FRAME_MS, nextLivePaint } from "@/utils/live-frame";
 
 /** Only above this zoom is a glide visible at all (35 m ~ 1.8 px at z12). */
 export const LIVE_MOTION_MIN_ZOOM = 12;
-/** Cap GPU uploads; 120 Hz displays do not need 120 GeoJSON writes. */
-const FRAME_MS = 1000 / 30;
+/** Subpixel interpolation at up to 60 fps, independent of the feed's cadence. */
+const FRAME_MS = LIVE_FRAME_MS;
 
 /**
  * Identity of what React must render: membership plus anything that changes a
@@ -113,12 +114,13 @@ export function useLiveMotion(
         return;
       }
       const moving = engine.current.isMoving(now);
-      if (!moving || now - lastPaint >= FRAME_MS) {
+      // Fractional tolerance avoids dropping alternate 60 Hz callbacks due
+      // to tiny timestamp jitter; never allows 120 Hz uploads.
+      if (!moving || now - lastPaint >= FRAME_MS - 0.5) {
         publish(now);
-        lastPaint = now;
+        lastPaint = nextLivePaint(now, lastPaint);
       }
       if (moving) frame.current = requestAnimationFrame(tick.current!);
-      else publish(now);
     };
 
     const visibility = () => reset(); // Never replay a hidden tab's path.
@@ -158,10 +160,14 @@ export function useLiveMotion(
         live.current.zoom < live.current.minZoom,
       shapeFor,
     );
-    // Sync React here: `vehicles` changing is exactly the membership event.
-    shown.current = appearanceKey(vehicles, ages);
+    // Snapshot clones arrive each second even when only positions changed.
+    // React owns membership/appearance; imperative diffs own positions.
+    const key = appearanceKey(vehicles, ages);
     const sampled = engine.current.sample(now);
-    setDisplayed(sampled);
+    if (key !== shown.current) {
+      shown.current = key;
+      setDisplayed(sampled);
+    }
     onFrame?.(sampled);
     if (engine.current.isMoving(now)) run();
   }, [vehicles, ages, shapeFor, onFrame]);

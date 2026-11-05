@@ -49,7 +49,8 @@ Markers glide between fixes at a constant speed along **the shape of the bus's o
 - **A shape is used only when it clearly explains the move.** No shape, an observation more than30 m off the shape, projections that run backwards (opposite direction, or a loop the bus already passed), or a detour more than twice the straight distance (a different branch of a fork) all fall back to a straight glide. Shapes come from the static GTFS route detail, fetched on demand for visible routes only above zoom12; the selected route reuses the detail already on the page.
 - **Motion is display-only and stops when it cannot be seen.** Below zoom12 the markers snap to each fix instead of animating, because a35 m move is under two pixels there. Reduced-motion users get snapped positions, hidden tabs stop animating, and stale or implausibly jumped fixes snap rather than crawl.
 - **Heading is a claim, so an unknown heading is no arrow.** A missing heading hides the arrow; a stationary bus keeps its last confident heading rather than spinning at a halte; during a glide the arrow follows the road's local direction.
-- Per-frame positions are written straight into the map source (a diff of only the buses that moved). React re-renders only when the set of buses, their badges, or their faded state changes.
+- Per-frame positions are written straight into the map source (a diff of only the buses that moved), at up to 60 fps, with exact coordinates: there is no minimum step, so sub-pixel motion is preserved. React re-renders only when the set of buses, their badges, or their faded state changes. The map runs with `fadeDuration: 0` so a symbol adopts its new anchor on the next frame instead of waiting for the 300 ms fade.
+- Shapes are fetched only for vehicles on screen, at most four at a time, and a failed route is retried no more than once every 30 seconds. A once-per-second position update never triggers a request.
 
 ## Verification
 

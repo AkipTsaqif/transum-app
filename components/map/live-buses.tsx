@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layer, Source, useMap } from "react-map-gl/maplibre";
 import type { Feature, FeatureCollection, Point } from "geojson";
+import type { GeoJSONSource, GeoJSONFeatureDiff } from "maplibre-gl";
+import { liveFeatureDiff, livePoseKey } from "@/utils/live-frame";
 import type { RouteDetail } from "@/utils/types/gtfs";
 import { LIVE_STALE_MS, type LiveVehicle } from "@/utils/types/live";
 import { LIVE_MOTION_MIN_ZOOM, useLiveMotion } from "@/hooks/use-live-motion";
@@ -91,8 +93,25 @@ export function LiveBusLayers({
   selectedDetail: RouteDetail | null;
 }) {
   const { current: map } = useMap();
+  // At neighbourhood zoom only load shapes for vehicles actually on screen,
+  // not every bus in a selected corridor's full-length stream.
+  const [viewportVersion, setViewportVersion] = useState(0);
+  useEffect(() => {
+    if (!map) return;
+    const changed = () => setViewportVersion((n) => n + 1);
+    map.on("moveend", changed);
+    return () => {
+      map.off("moveend", changed);
+    };
+  }, [map]);
+  const visible = useMemo(() => {
+    const bounds = map?.getBounds();
+    return bounds
+      ? vehicles.filter((v) => bounds.contains([v.longitude, v.latitude]))
+      : [];
+  }, [map, vehicles, viewportVersion]);
   const shapeFor = useLiveShapes({
-    vehicles,
+    vehicles: visible,
     zoom,
     enabled: vehicles.length > 0,
     selectedRouteId,
@@ -101,40 +120,56 @@ export function LiveBusLayers({
   const [mapBearing, setMapBearing] = useState(0);
   /** Last pose written per bus, so only genuinely moved features are sent. */
   const written = useRef(new Map<string, string>());
+  const frameContext = useRef({ ages, mapBearing });
+  frameContext.current = { ages, mapBearing };
+  const [sourceEpoch, setSourceEpoch] = useState(0);
 
   const onFrame = useCallback(
     (frame: LiveVehicle[]) => {
       const source = map?.getSource?.("live-buses") as
-        { updateData?: (diff: unknown) => void } | undefined;
+        GeoJSONSource | undefined;
       if (!source?.updateData) return;
-      const update: Feature<Point>[] = [];
+      const { ages, mapBearing } = frameContext.current;
+      const update: GeoJSONFeatureDiff[] = [];
       const seen = new Set<string>();
       for (const v of frame) {
         seen.add(v.id);
-        const key = `${v.latitude.toFixed(6)},${v.longitude.toFixed(6)},${v.bearing ?? "x"}`;
+        const key = `${livePoseKey(v.latitude, v.longitude, v.bearing)}|${mapBearing}|${(ages[v.id] ?? 0) >= LIVE_STALE_MS}`;
         if (written.current.get(v.id) === key) continue;
         written.current.set(v.id, key);
         update.push(
-          featureFor(v, (ages[v.id] ?? 0) >= LIVE_STALE_MS, mapBearing),
+          liveFeatureDiff(
+            featureFor(v, (ages[v.id] ?? 0) >= LIVE_STALE_MS, mapBearing),
+          ),
         );
       }
       const remove = [...written.current.keys()].filter((id) => !seen.has(id));
       if (!update.length && !remove.length) return;
       for (const id of remove) written.current.delete(id);
       try {
-        source.updateData(remove.length ? { update, remove } : { update });
+        void source
+          .updateData(remove.length ? { update, remove } : { update })
+          .catch(() => {
+            // A style/source swap can invalidate an in-flight worker write.
+            if (map?.getSource("live-buses") === source)
+              written.current.clear();
+          });
       } catch {
         // Source swapped mid-flight (style reload): the next React sync redraws.
       }
     },
-    [map, ages, mapBearing],
+    [map],
   );
 
   const displayed = useLiveMotion(vehicles, ages, { zoom, shapeFor, onFrame });
 
   useEffect(() => {
     if (!map) return;
-    const sync = () => setMapBearing(Math.round(map.getBearing()));
+    const sync = () => {
+      const bearing = Math.round(map.getBearing());
+      frameContext.current.mapBearing = bearing;
+      setMapBearing(bearing);
+    };
     sync();
     map.on("rotate", sync);
     return () => {
@@ -227,10 +262,15 @@ export function LiveBusLayers({
     () => ({
       type: "FeatureCollection",
       features: displayed.map((v) =>
-        featureFor(v, (ages[v.id] ?? 0) >= LIVE_STALE_MS, mapBearing),
+        featureFor(
+          v,
+          (frameContext.current.ages[v.id] ?? 0) >= LIVE_STALE_MS,
+          mapBearing,
+        ),
       ),
     }),
-    [displayed, ages, mapBearing],
+    // Age-only snapshot ticks must not replace the source during a glide.
+    [displayed, mapBearing, sourceEpoch],
   );
 
   // A full re-upload resets the source; forget what the diff thought it wrote.
@@ -238,17 +278,30 @@ export function LiveBusLayers({
     written.current.clear();
   }, [geo]);
 
+  useEffect(() => {
+    if (!map) return;
+    const reset = () => {
+      written.current.clear();
+      setSourceEpoch((n) => n + 1);
+    };
+    map.on("style.load", reset);
+    return () => {
+      map.off("style.load", reset);
+    };
+  }, [map]);
+
   return (
     <Source id="live-buses" type="geojson" data={geo}>
       <Layer
         id="live-bus-arrow"
         type="symbol"
+        filter={["!=", ["get", "heading"], null]}
         layout={{
           "icon-image": ["coalesce", ["get", "arrow"], ""],
           // Map space: a bus heading east stays pointing at the east on the
           // ground however the user rotates the map.
           "icon-rotation-alignment": "map",
-          "icon-rotate": ["get", "heading"],
+          "icon-rotate": ["coalesce", ["get", "heading"], 0],
           "icon-offset": ["get", "arrowOffset"],
           "icon-allow-overlap": true,
           "icon-ignore-placement": true,

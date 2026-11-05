@@ -1381,6 +1381,10 @@ const MainMapComponent = ({
   return (
     <MapGL
       ref={mapRef}
+      // Symbol placement normally waits up to the 300ms fade duration before
+      // adopting new anchors. Live vehicle icons need each applied pose now;
+      // disabling the fade also makes ordinary label changes instantaneous.
+      fadeDuration={0}
       // Clicking a GPU circle layer: hit-test by layer id, since these
       // are painted pixels rather than DOM nodes with their own handlers.
       interactiveLayerIds={[

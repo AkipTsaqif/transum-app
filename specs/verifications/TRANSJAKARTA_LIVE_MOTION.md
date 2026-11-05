@@ -32,6 +32,29 @@ Instrumented `CanvasRenderingContext2D.measureText` (badge font only), `GeoJSONS
 
 Note: `querySourceFeatures` is tile-quantized, so it cannot evidence a sub-pixel glide; the diff trace above is the authoritative measurement of what the map receives.
 
+## CORRECTION AND RE-MEASUREMENT (same branch, after the numbers above)
+
+The `updateData` calls counted above only proved that calls were made. `LiveBusLayers` was passing full GeoJSON Features in `diff.update`, while MapLibre6.12 applies `GeoJSONFeatureDiff` (`id`, `newGeometry`, `addOrUpdateProperties`), so those writes were **ignored by the worker** and the visible movement came from the once-per-second React `setData`. Earlier rows claiming on-shape positions from tile queries measured the snapshot, not the animation. Bug: `specs/bugs/BUG-live-frame-diffs.md`.
+
+Fixes: typed `liveFeatureDiff()` writes, exact coordinates (no minimum step / no six-decimal rounding), 60 fps with the frame remainder preserved (measured ~57, not45), React `setData` no longer fires on position-only snapshot ticks, `fadeDuration: 0` so symbol placement adopts each anchor immediately instead of the300 ms fade, and bounded shape loading (visible vehicles only,4 concurrent,30 s failure cooldown, no request per snapshot).
+
+Re-measured with a single deterministic synthetic `EventSource` vehicle inside a normal browser session (the sidecar and dataset are untouched; only that page instance is faked):
+
+| Check                                      | Desktop1440x900                       | Phone390x844    |
+| ------------------------------------------ | ------------------------------------- | --------------- |
+| Per-frame source writes                    | **57.0/s**                            | 56.3/s          |
+| Writes applied by the worker               | 57.0/s                                | 56.3/s          |
+| Distinct actually-rendered positions in3 s | **168** (was11)                       | 168             |
+| Full `setData` during animation            | **0** (was once per second)           | 0               |
+| `getData()` final geometry vs last sample  | within0.001 deg                       | within0.001 deg |
+| Below zoom12                               | exact snapshot position, no animation | same            |
+| Camera during updates                      | unchanged (z16, same centre)          | same            |
+| Failed shape route over6.5 s of snapshots  | **1** request, not one per second     | -               |
+| Low-zoom shape requests                    | **0**                                 | -               |
+| Runtime errors                             | none                                  | none            |
+
+Unit suite at the end: **144 tests pass**, tsc clean.
+
 ## Behaviour boundaries confirmed
 
 No extrapolation: every marker pose is computed from the two surrounding observations (or the road between them). Unknown heading means no arrow. Below z12 nothing animates. A shape that does not explain the move is not used.

@@ -3,27 +3,15 @@ import { useCallback, useEffect, useRef } from "react";
 import type { RouteDetail } from "@/utils/types/gtfs";
 import type { LiveVehicle } from "@/utils/types/live";
 import type { ShapeFor } from "@/utils/live-motion";
-import type { LngLat } from "@/utils/live-path";
 import { LiveShapeIndex } from "@/utils/live-shapes";
+import { LiveShapeRequests } from "@/utils/live-shape-requests";
 
-/** Same reasoning as the page: baked data only changes at deploy. */
 const NO_CACHE_IN_DEV: RequestInit =
   process.env.NODE_ENV === "production" ? {} : { cache: "no-store" };
-
-/** Shapes are only worth downloading once the glide is actually visible. */
 export const LIVE_SHAPES_MIN_ZOOM = 12;
 const CONCURRENCY = 4;
 
-/**
- * Supply the road geometry each live vehicle is driving, so the motion engine
- * can follow it instead of cutting corners.
- *
- * - The selected route's detail is already on the page: reuse it, no request.
- * - Viewport mode fetches the detail of routes that currently have vehicles,
- *   only above `LIVE_SHAPES_MIN_ZOOM`, at most four at a time, cached per
- *   session and bounded by `LiveShapeIndex`.
- * - Anything unresolved returns null and the caller draws a straight line.
- */
+/** Bounded shape loading. Snapshot ticks neither retry failures nor churn the LRU. */
 export function useLiveShapes(options: {
   vehicles: LiveVehicle[];
   zoom: number;
@@ -33,74 +21,75 @@ export function useLiveShapes(options: {
 }): ShapeFor {
   const { vehicles, zoom, enabled, selectedRouteId, selectedDetail } = options;
   const index = useRef(new LiveShapeIndex());
-  const inFlight = useRef(new Set<string>());
-  const queue = useRef<string[]>([]);
-  const active = useRef(0);
-  const abort = useRef<AbortController | null>(null);
+  const policy = useRef(new LiveShapeRequests());
+  const wantedIds =
+    enabled && zoom >= LIVE_SHAPES_MIN_ZOOM
+      ? [...new Set(vehicles.map((v) => v.routeId))].sort()
+      : [];
+  const wantedKey = JSON.stringify(wantedIds);
+  const fetchTasks = useRef(new Map<string, Promise<void>>());
 
-  // The page already has this route's geometry; never pay for it twice.
   useEffect(() => {
     if (selectedDetail && selectedDetail.route_id === selectedRouteId)
       index.current.set(selectedDetail.route_id, selectedDetail);
   }, [selectedDetail, selectedRouteId]);
 
   useEffect(() => {
+    const wanted = JSON.parse(wantedKey) as string[];
+    if (!wanted.length) return;
     const ctrl = new AbortController();
-    abort.current = ctrl;
-    return () => {
-      ctrl.abort();
-      abort.current = null;
-      inFlight.current.clear();
-      queue.current = [];
-      active.current = 0;
+    let queue: string[] = [];
+    let active = 0;
+    const refill = () => {
+      if (ctrl.signal.aborted) return;
+      queue = policy.current
+        .select(wanted, Date.now())
+        .filter((id) => !index.current.has(id) && !fetchTasks.current.has(id));
+      pump();
     };
-  }, []);
-
-  useEffect(() => {
-    if (!enabled || zoom < LIVE_SHAPES_MIN_ZOOM) return;
-    const wanted = new Set(vehicles.map((v) => v.routeId));
-    for (const routeId of wanted) {
-      if (index.current.has(routeId) || inFlight.current.has(routeId)) continue;
-      if (!queue.current.includes(routeId)) queue.current.push(routeId);
-    }
-
     const pump = () => {
-      while (active.current < CONCURRENCY && queue.current.length) {
-        const routeId = queue.current.shift()!;
-        const ctrl = abort.current;
-        if (!ctrl || ctrl.signal.aborted) return;
-        if (index.current.has(routeId)) continue;
-        inFlight.current.add(routeId);
-        active.current++;
-        void fetch(`/api/gtfs/routes/${encodeURIComponent(routeId)}`, {
+      while (!ctrl.signal.aborted && active < CONCURRENCY && queue.length) {
+        const routeId = queue.shift()!;
+        if (index.current.has(routeId) || fetchTasks.current.has(routeId))
+          continue;
+        active++;
+        const task = fetch(`/api/gtfs/routes/${encodeURIComponent(routeId)}`, {
           ...NO_CACHE_IN_DEV,
           signal: ctrl.signal,
         })
           .then(async (res) => {
-            if (!res.ok) return;
+            if (!res.ok) throw new Error("Shape unavailable");
             const detail = (await res.json()) as RouteDetail;
-            // Only keep it if it is still a route we asked for.
-            if (detail?.route_id === routeId)
-              index.current.set(routeId, detail);
+            if (ctrl.signal.aborted) return;
+            if (detail?.route_id !== routeId) throw new Error("Wrong route");
+            index.current.set(routeId, detail);
           })
           .catch(() => {
-            // A failed shape is not an error the user must see: the glide
-            // simply stays straight for that route.
+            if (!ctrl.signal.aborted)
+              policy.current.failed(routeId, Date.now());
           })
           .finally(() => {
-            inFlight.current.delete(routeId);
-            active.current--;
-            pump();
+            if (fetchTasks.current.get(routeId) === task)
+              fetchTasks.current.delete(routeId);
+            active--;
+            if (!ctrl.signal.aborted) pump();
           });
+        fetchTasks.current.set(routeId, task);
       }
     };
-    pump();
-  }, [vehicles, zoom, enabled]);
+    refill();
+    // Cooldown retry and recovery after an aborted obsolete request. Never one
+    // request per source snapshot; at most one failed retry each 30 seconds.
+    const retry = setInterval(refill, 30_000);
+    return () => {
+      ctrl.abort();
+      queue = [];
+      clearInterval(retry);
+    };
+  }, [wantedKey]);
 
-  return useCallback<ShapeFor>((vehicle: LiveVehicle): LngLat[] | null => {
-    const shapes = index.current.resolve(vehicle.routeId, vehicle.tripId);
-    if (!shapes) return null;
-    // Refresh LRU ordering on use.
-    return shapes;
-  }, []);
+  return useCallback<ShapeFor>(
+    (vehicle) => index.current.resolve(vehicle.routeId, vehicle.tripId),
+    [],
+  );
 }

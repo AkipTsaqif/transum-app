@@ -48,7 +48,7 @@ export function LiveControl({
 			{enabled && (
 				<>
 					<p role="status" className="px-2 text-xs text-white/70">
-						{labels[status]} · {vehicles.length} armada teramati
+						{labels[status]} · {vehicles.length} armada terpantau
 						{status === "live" && vehicles.length === 0
 							? " · Mengumpulkan posisi bus…"
 							: ""}
