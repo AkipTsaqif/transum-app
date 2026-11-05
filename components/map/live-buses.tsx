@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Layer, Source, useMap } from "react-map-gl/maplibre";
 import type { FeatureCollection, Point } from "geojson";
 import { LIVE_STALE_MS, type LiveVehicle } from "@/utils/types/live";
+import { useLiveMotion } from "@/hooks/use-live-motion";
 import {
   ARROW_HEIGHT,
   ARROW_WIDTH,
@@ -43,6 +44,7 @@ export function LiveBusLayers({
   ages: Record<string, number>;
 }) {
   const { current: map } = useMap();
+  const displayed = useLiveMotion(vehicles, ages);
   // Whole degrees: the edge distance only changes visibly at that scale.
   const [mapBearing, setMapBearing] = useState(0);
   useEffect(() => {
@@ -83,7 +85,11 @@ export function LiveBusLayers({
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
             ctx.fillStyle = v.routeTextColor;
-            ctx.fillText(v.routeShortName, width / 2 + 1, BADGE_HEIGHT / 2 + 1.5);
+            ctx.fillText(
+              v.routeShortName,
+              width / 2 + 1,
+              BADGE_HEIGHT / 2 + 1.5,
+            );
             // addImage can emit styledata: the registering guard prevents re-entry.
             if (!map.hasImage(id))
               map.addImage(
@@ -135,7 +141,7 @@ export function LiveBusLayers({
   const geo = useMemo<FeatureCollection<Point>>(
     () => ({
       type: "FeatureCollection",
-      features: vehicles.map((v) => {
+      features: displayed.map((v) => {
         const width = badgeWidth(labelWidth(v.routeShortName));
         return {
           type: "Feature",
@@ -147,7 +153,10 @@ export function LiveBusLayers({
             image: imageKey(v),
             arrow: arrowKey(v),
             heading: v.bearing,
-            arrowOffset: arrowOffset(width, screenHeading(v.bearing, mapBearing)),
+            arrowOffset: arrowOffset(
+              width,
+              screenHeading(v.bearing, mapBearing),
+            ),
             faded: (ages[v.id] ?? 0) >= LIVE_STALE_MS ? 0.4 : 1,
           },
           geometry: {
@@ -157,7 +166,7 @@ export function LiveBusLayers({
         };
       }),
     }),
-    [vehicles, ages, mapBearing],
+    [displayed, ages, mapBearing],
   );
   return (
     <Source id="live-buses" type="geojson" data={geo}>

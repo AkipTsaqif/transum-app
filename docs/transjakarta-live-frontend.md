@@ -39,7 +39,7 @@ data: {"scopeKey":"route=1","routeId":"1","status":"live","serverTime":180000000
 
 Each vehicle has validated raw/snapped coordinates, routeId/routeShortName/routeColor/routeTextColor derived from GTFS, identity, headsign, currentStop/nextStop, receivedAt, sourceTimestamp, clockOffsetMs and clock classification. Colours must be #RRGGBB. The client rejects invalid positions/styles and mismatched scope data. Never send credentials, guest tokens or full upstream payloads to the frontend.
 
-The browser computes age from `serverTime - receivedAt` plus local elapsed monotonic time, not by comparing server epoch to the browser's wall clock. Uncorrected bus time is not the freshness oracle. Markers fade after30s and expire after90s without observation updates. Hidden tabs close SSE; reconnect uses bounded backoff. Live updates must not modify camera bounds.
+The browser computes receipt age from `serverTime - receivedAt` plus elapsed local time, not by comparing server epoch to the browser's wall clock. Elapsed time uses both monotonic and wall clocks so system sleep expires old observations even if a browser pauses its monotonic clock. Uncorrected bus time is not the freshness oracle. Markers fade after30s and expire after90s without observation updates. Hidden tabs close SSE but keep the last positions in memory; on return they remain visible while reconnecting, with their original receipt ages advanced by the hidden interval. Empty connecting snapshots do not clear this cache; a live snapshot replaces it, including an empty one. Nothing is written to localStorage or a position-history store. Reconnect uses bounded backoff. Live updates must not modify camera bounds.
 
 ## Verification
 

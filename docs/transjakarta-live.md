@@ -38,7 +38,7 @@ The listener accepts either a known GTFS route ID or a valid viewport bbox (west
 - Do not round route codes or guess unmatched aliases.
 - Source `timestamp` seconds/milliseconds normalize to epoch ms. Equal/older timestamps do not refresh marker TTL. No `last_update` or ETA units are assumed.
 - Relative source progression can establish a per-vehicle clock offset. This does NOT prove true observation age: an old queued stream can advance too. The card marks uncertain or adjusted clocks. No blanket timezone correction.
-- Fade at30s and remove at90s without new advancing observations. These are operational UI thresholds, not an upstream SLA. Hidden browser tabs close their SSE connection and resume with a new snapshot.
+- Fade at30s and remove at90s without new advancing observations. These are operational UI thresholds, not an upstream SLA. Hidden browser tabs close SSE but retain the last positions in memory. On return the UI shows cached positions while reconnecting; their ages include time spent hidden or asleep. An empty connecting snapshot does not clear them, but the next live snapshot replaces them, even when empty. No position history is persisted.
 - Only latest state retained in bounded memory; no track history, raw payload archive, guest tokens or private user fields. Route badges use trusted GTFS names/colours and never arbitrary upstream CSS or image URLs.
 - Sidecar outputs at most one filtered snapshot/second. Slow clients have bounded write buffering; viewer cap200. MQTT retries back off to30s with jitter. Only SUBACK acceptance marks the feed connected.
 

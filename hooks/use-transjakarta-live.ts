@@ -6,8 +6,12 @@ import {
   vehicleInScope,
 } from "@/utils/live-scope";
 import {
+  elapsedSince,
+  projectCachedVehicles,
+  shouldReplaceCachedVehicles,
+} from "@/utils/live-cache";
+import {
   type LiveScope,
-  LIVE_TTL_MS,
   type LiveSnapshot,
   type LiveStatus,
   type LiveVehicle,
@@ -57,10 +61,7 @@ const scopeFromKey = (key: string): LiveScope => {
 };
 
 /** Browser has no broker connection. Age uses elapsed local time + server-relative age. */
-export function useTransjakartaLive(
-  scope: LiveScope,
-  enabled: boolean,
-): State {
+export function useTransjakartaLive(scope: LiveScope, enabled: boolean): State {
   const scopeKey = liveScopeQuery(scope);
   const [state, setState] = useState<State>(() => empty(""));
   // The last state the effect produced, so a new viewport stream can keep the
@@ -80,49 +81,25 @@ export function useTransjakartaLive(
       : [];
     const keptAges: Record<string, number> = {};
     for (const v of kept) keptAges[v.id] = before.ages[v.id] ?? 0;
-    // Show the carried-over buses for this scope straight away, without the
-    // empty "connecting" frame in between.
-    if (kept.length)
-      setState({
-        scopeKey,
-        status: before.status === "live" ? "live" : "connecting",
-        vehicles: kept,
-        ages: keptAges,
-      });
     let disposed = false,
       source: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null,
       attempts = 0;
-    let lastFrameAt = 0,
-      frameAt = 0,
-      serverTime = 0;
-    let current: LiveVehicle[] = [];
+    let lastFrameAt = 0;
+    let current = kept;
+    let receiptAges = keptAges;
+    const clock = () => ({ wall: Date.now(), monotonic: performance.now() });
+    let receivedClock = clock();
     let status: LiveStatus =
       kept.length && before.status === "live" ? "live" : "connecting";
-    // Until this stream's first snapshot, the carried-over buses stand in for
-    // it. They keep their own ages so they still fade and expire on time.
-    let firstFrame = false;
-    const startedAt = performance.now();
+    let waitingForFirstFrame = true;
     const refresh = () => {
-      if (!firstFrame && kept.length) {
-        const elapsed = performance.now() - startedAt;
-        const ages: Record<string, number> = {};
-        const vehicles = kept.filter((v) => {
-          const age = (keptAges[v.id] ?? 0) + elapsed;
-          ages[v.id] = age;
-          return age < LIVE_TTL_MS;
-        });
-        if (!disposed) setState({ scopeKey, status, vehicles, ages });
-        return;
-      }
-      const elapsed = frameAt ? performance.now() - frameAt : 0;
-      const ages: Record<string, number> = {};
-      const vehicles = current.filter((v) => {
-        const age = Math.max(0, serverTime - v.receivedAt) + elapsed;
-        ages[v.id] = age;
-        return age < LIVE_TTL_MS;
-      });
-      if (!disposed) setState({ scopeKey, status, vehicles, ages });
+      const cached = projectCachedVehicles(
+        current,
+        receiptAges,
+        elapsedSince(receivedClock, clock()),
+      );
+      if (!disposed) setState({ scopeKey, status, ...cached });
     };
     const close = () => {
       source?.close();
@@ -143,7 +120,7 @@ export function useTransjakartaLive(
       if (disposed || document.hidden || !navigator.onLine) return;
       // A viewport move into a fresh area is not a lost connection: while the
       // carried-over buses are still showing, keep reporting "live".
-      if (!(status === "live" && !firstFrame && kept.length))
+      if (!(status === "live" && waitingForFirstFrame && kept.length))
         status = attempts ? "reconnecting" : "connecting";
       lastFrameAt = performance.now();
       refresh();
@@ -169,10 +146,21 @@ export function useTransjakartaLive(
             )
           )
             throw new Error("Invalid snapshot");
-          current = p.vehicles.filter((v) => validVehicle(v, currentScope));
-          firstFrame = true;
-          serverTime = p.serverTime;
-          frameAt = lastFrameAt = performance.now();
+          const incoming = p.vehicles.filter((v) =>
+            validVehicle(v, currentScope),
+          );
+          if (shouldReplaceCachedVehicles(p.status, incoming.length)) {
+            current = incoming;
+            receiptAges = Object.fromEntries(
+              current.map((v) => [
+                v.id,
+                Math.max(0, p.serverTime - v.receivedAt),
+              ]),
+            );
+            receivedClock = clock();
+          }
+          waitingForFirstFrame = false;
+          lastFrameAt = performance.now();
           status = p.status;
           attempts = 0;
           refresh();
@@ -188,12 +176,10 @@ export function useTransjakartaLive(
       close();
       if (retry) clearTimeout(retry);
       retry = null;
-      // A resumed page starts from a new snapshot, never a stale hidden-tab cache.
-      current = [];
-      kept.length = 0;
-      firstFrame = true;
-      frameAt = 0;
-      status = "disconnected";
+      // Keep the last observed positions in memory while hidden. On return
+      // their original ages advance by the entire hidden/sleep interval;
+      // the first authoritative live snapshot replaces the cache, even empty.
+      status = document.hidden ? "disconnected" : "reconnecting";
       refresh();
       if (!document.hidden) connect();
     };
@@ -201,9 +187,6 @@ export function useTransjakartaLive(
       close();
       if (retry) clearTimeout(retry);
       retry = null;
-      // Offline is a real loss: stop presenting carried-over buses as live.
-      kept.length = 0;
-      firstFrame = true;
       status = "reconnecting";
       refresh();
     };
@@ -211,12 +194,8 @@ export function useTransjakartaLive(
     window.addEventListener("offline", offline);
     window.addEventListener("online", visibility);
     const ticker = setInterval(() => {
-      if (
-        !document.hidden &&
-        source &&
-        performance.now() - lastFrameAt > 25_000
-      )
-        scheduleRetry();
+      if (document.hidden) return;
+      if (source && performance.now() - lastFrameAt > 25_000) scheduleRetry();
       refresh();
     }, 1000);
     connect();
