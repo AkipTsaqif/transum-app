@@ -44,9 +44,9 @@ The listener accepts either a known GTFS route ID or a valid viewport bbox (west
 - Only latest state retained in bounded memory; no track history, raw payload archive, guest tokens or private user fields. Route badges use trusted GTFS names/colours and never arbitrary upstream CSS or image URLs.
 - Sidecar outputs at most one filtered snapshot/second. Slow clients have bounded write buffering; viewer cap200. MQTT retries back off to30s with jitter. Only SUBACK acceptance marks the feed connected.
 
-## VPS setup (not deployed)
+## VPS setup
 
-Run exactly one persistent sidecar per upstream fleet subscription; scale downstream fan-out deliberately, not by spawning more upstream subscribers. Supervise it with systemd or an equivalent service manager. Production must have an exact `TJ_LIVE_ALLOWED_ORIGIN` matching the public site origin. Use an empty `NEXT_PUBLIC_LIVE_BASE_URL` at **build time**, and enable the UI only after access and republication terms are confirmed.
+Run exactly one persistent sidecar per upstream fleet subscription; scale downstream fan-out deliberately, not by spawning more upstream subscribers. Supervise it with Docker Compose (`Dockerfile.live`, `docker-compose.live.yml`) or systemd. Production must have an exact `TJ_LIVE_ALLOWED_ORIGIN` matching the public site origin. Point `NEXT_PUBLIC_LIVE_BASE_URL` at the HTTPS sidecar origin at **build time**, and enable the UI only after access and republication terms are confirmed. Full steps: `docs/transjakarta-live-deploy.md`.
 
 Example nginx location inside the same HTTPS server block:
 

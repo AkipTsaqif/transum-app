@@ -1,0 +1,40 @@
+# Live bus sidecar. Run from the repo root:
+#   docker compose -f docker-compose.live.yml up -d --build
+# The Next.js app is deployed separately on Vercel.
+services:
+  live:
+    build:
+      context: .
+      dockerfile: Dockerfile.live
+    image: transum-live:latest
+    container_name: transum-live
+    restart: unless-stopped
+
+    # Only the sidecar's own settings. Keep this file separate from any app
+    # .env: everything listed here is injected into the container, and the
+    # sidecar has no use for Supabase or MapTiler keys.
+    env_file:
+      - live.env
+    # Fixed infrastructure values; live.env supplies enabled + allowed origin.
+    environment:
+      TJ_LIVE_HOST: "0.0.0.0"
+      TJ_LIVE_PORT: "8787"
+
+    # Published on loopback only: a reverse proxy on the host terminates TLS.
+    # Remove this block and use `expose` if the proxy runs in another container.
+    ports:
+      - "127.0.0.1:8787:8787"
+
+    # Bounded so a stuck feed cannot exhaust the VPS.
+    mem_limit: 256m
+    memswap_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
