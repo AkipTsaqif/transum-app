@@ -26,7 +26,7 @@ with `npm run build:live` if you want the same artefact without Docker.
   Dockerfile.live  docker-compose.live.yml  .dockerignore
   live/  utils/  scripts/build-live-server.mjs
   data/gtfs/routes.json
-  .env
+  live.env
 ```
 
 `utils/` is large but only a few files are pulled into the bundle; the build
@@ -35,16 +35,27 @@ context filter in `.dockerignore` keeps everything else out.
 ## Steps
 
 1. Put the repo (or a `git archive` of it) at `/opt/transum-live`.
-2. Create `/opt/transum-live/.env`:
+2. Create `/opt/transum-live/live.env` — **two lines, nothing else**:
 
-   ```
+   ```dotenv
+   TJ_LIVE_ENABLED=true
    TJ_LIVE_ALLOWED_ORIGIN=https://<your-vercel-domain>
    ```
+
+   This file is separate from the app's `.env` on purpose: everything in it is
+   injected into the container, and the sidecar has no use for Supabase or
+   MapTiler keys. Do not symlink or copy the app `.env` here.
 
    The origin must match the page exactly — a `https://` site cannot use
    `http://`, and `www.` differs from the bare domain. Preview deployments
    (`*.vercel.app`) are **not** allowed by this single-origin check; that is
    intentional.
+
+   Both values are validated at startup. A missing origin, a trailing slash
+   (`https://site/`) or a path (`https://site/live`) stops the container with a
+   message naming the corrected value, instead of accepting every site or
+   failing every request with 403. `docker compose logs` shows it, and the
+   restart policy will keep retrying until the file is fixed.
 
 3. Build and start:
 
@@ -165,7 +176,9 @@ docker stats transum-live                                     # memory
 docker compose -f docker-compose.live.yml restart
 ```
 
-- `restart: unless-stopped` covers crashes and VPS reboots.
+- `restart: unless-stopped` covers crashes and VPS reboots. If `live.env` is
+  misconfigured the container exits immediately and restarts in a backoff
+  loop; the reason is in the logs, not in `/live/health`.
 - `mem_limit: 256m` plus `read_only` and `no-new-privileges` bound the damage
   from a stuck feed.
 - The health check reports `/live/health` only: it proves the process answers

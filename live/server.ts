@@ -4,6 +4,7 @@ import { LiveHub } from "./hub";
 import { createLiveServer } from "./http";
 import { connectTransjakarta } from "./mqtt-subscriber";
 import { loadLiveEnv } from "./env";
+import { liveConfig } from "./config";
 
 async function main() {
   const envFiles = loadLiveEnv();
@@ -26,18 +27,10 @@ async function main() {
     ]),
   );
   const hub = new LiveHub(routes, connectTransjakarta, { styles });
-  const enabled = process.env.TJ_LIVE_ENABLED === "true";
-  const server = createLiveServer(hub, {
-    enabled,
-    allowedOrigin: process.env.TJ_LIVE_ALLOWED_ORIGIN,
-  });
-  const port = Number(process.env.TJ_LIVE_PORT ?? 8787);
-  if (!Number.isInteger(port) || port < 1 || port > 65535)
-    throw new Error("Invalid TJ_LIVE_PORT");
-  // Loopback by default: a reverse proxy terminates TLS and the sidecar is
-  // never exposed directly. Only a container sets this to 0.0.0.0, where the
-  // container's own network boundary is the thing keeping it private.
-  const host = process.env.TJ_LIVE_HOST?.trim() || "127.0.0.1";
+  // Validated before listening: a missing origin would otherwise accept every
+  // site, and a trailing-slash origin would 403 for reasons the log hides.
+  const { enabled, allowedOrigin, host, port } = liveConfig(process.env);
+  const server = createLiveServer(hub, { enabled, allowedOrigin });
   server.listen(port, host, () =>
     console.log(
       JSON.stringify({
@@ -45,7 +38,7 @@ async function main() {
         port,
         host,
         enabled,
-        allowedOrigin: process.env.TJ_LIVE_ALLOWED_ORIGIN ?? null,
+        allowedOrigin: allowedOrigin ?? null,
         envFiles,
       }),
     ),
