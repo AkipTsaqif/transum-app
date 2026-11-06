@@ -1,0 +1,13 @@
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!utils/
+!live/
+!scripts/build-live-server.mjs
+!data/gtfs/routes.json
+
+# Local inputs that must never enter an image.
+**/.env*
+**/node_modules
+**/*.test.ts

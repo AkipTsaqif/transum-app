@@ -5,6 +5,7 @@
     "build": "next build",
     "start": "next start",
     "live": "tsx live/server.ts",
+    "build:live": "node scripts/build-live-server.mjs",
     "test:live": "tsx --test utils/transjakarta-live.test.ts live/*.test.ts",
     "sync:gtfs": "tsx scripts/sync-gtfs.ts",
     "sync:gtfs:force": "tsx scripts/sync-gtfs.ts --force",

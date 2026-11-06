@@ -34,11 +34,16 @@ async function main() {
   const port = Number(process.env.TJ_LIVE_PORT ?? 8787);
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("Invalid TJ_LIVE_PORT");
-  server.listen(port, "127.0.0.1", () =>
+  // Loopback by default: a reverse proxy terminates TLS and the sidecar is
+  // never exposed directly. Only a container sets this to 0.0.0.0, where the
+  // container's own network boundary is the thing keeping it private.
+  const host = process.env.TJ_LIVE_HOST?.trim() || "127.0.0.1";
+  server.listen(port, host, () =>
     console.log(
       JSON.stringify({
         event: "live_listening",
         port,
+        host,
         enabled,
         allowedOrigin: process.env.TJ_LIVE_ALLOWED_ORIGIN ?? null,
         envFiles,
